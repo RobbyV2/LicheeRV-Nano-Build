@@ -25,6 +25,7 @@ cp -rf kvm/init.d mountpoint/etc/
 cp -rf kvm/data mountpoint/mnt/
 mkdir mountpoint/etc/kvm/
 touch mountpoint/etc/kvm/ssh_stop
+rm -rf mountpoint/mnt/system/ko/soph_saradc.ko
 umount mountpoint
 
 # ./kvm/NanoKVM_img.sh /home/bugu/LicheeRV-Nano-Build/install/soc_sg2002_licheervnano_sd/images/2025-02-17-19-08-3649fe.img
