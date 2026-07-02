@@ -22,6 +22,7 @@ cp -f kvm/kvmapp/system/ko/soph_mipi_rx.ko ./mountpoint/mnt/system/ko/
 chmod +x mountpoint/mnt/system/ko/soph_mipi_rx.ko
 rm -rf mountpoint/etc/init.d
 cp -rf kvm/init.d mountpoint/etc/
+cp -rf kvm/data mountpoint/mnt/
 mkdir mountpoint/etc/kvm/
 touch mountpoint/etc/kvm/ssh_stop
 umount mountpoint

@@ -3,6 +3,8 @@
 *.o
 *.ko
 *.d
+# keep init.d directory
+!kvm/init.d/*
 host-tools/
 host-tools
 *.sqfs
