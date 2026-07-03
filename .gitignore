@@ -5,6 +5,8 @@
 *.d
 # keep init.d directory
 !kvm/init.d/*
+!buildroot/board/cvitek/SG200X/overlay/etc/init.d/
+!buildroot/board/cvitek/SG200X/overlay/etc/init.d/*
 host-tools/
 host-tools
 *.sqfs
