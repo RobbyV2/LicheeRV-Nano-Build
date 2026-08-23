@@ -287,13 +287,15 @@ uvc_function_set_alt(struct usb_function *f, unsigned interface, unsigned alt)
 			return -EINVAL;
 
 		uvcg_info(f, "reset UVC Control\n");
-		usb_ep_disable(uvc->control_ep);
+		if (uvc->control_ep) {
+			usb_ep_disable(uvc->control_ep);
 
-		if (!uvc->control_ep->desc)
-			if (config_ep_by_speed(cdev->gadget, f, uvc->control_ep))
-				return -EINVAL;
+			if (!uvc->control_ep->desc)
+				if (config_ep_by_speed(cdev->gadget, f, uvc->control_ep))
+					return -EINVAL;
 
-		usb_ep_enable(uvc->control_ep);
+			usb_ep_enable(uvc->control_ep);
+		}
 
 		if (uvc->state == UVC_STATE_DISCONNECTED) {
 			memset(&v4l2_event, 0, sizeof(v4l2_event));
@@ -371,7 +373,8 @@ uvc_function_disable(struct usb_function *f)
 	uvc->state = UVC_STATE_DISCONNECTED;
 
 	usb_ep_disable(uvc->video.ep);
-	usb_ep_disable(uvc->control_ep);
+	if (uvc->control_ep)
+		usb_ep_disable(uvc->control_ep);
 }
 
 /* --------------------------------------------------------------------------
@@ -473,6 +476,7 @@ uvc_copy_descriptors(struct uvc_device *uvc, enum usb_device_speed speed)
 	unsigned int streaming_size;
 	unsigned int n_desc;
 	unsigned int bytes;
+	bool interrupt_ep = uvc->control_ep != NULL;
 	void *mem;
 
 	switch (speed) {
@@ -516,14 +520,17 @@ uvc_copy_descriptors(struct uvc_device *uvc, enum usb_device_speed speed)
 	control_size = 0;
 	streaming_size = 0;
 	bytes = uvc_iad.bLength + uvc_control_intf.bLength
-	      + uvc_control_ep.bLength + uvc_control_cs_ep.bLength
 	      + uvc_streaming_intf_alt0.bLength;
+	n_desc = 3;
 
-	if (speed == USB_SPEED_SUPER) {
-		bytes += uvc_ss_control_comp.bLength;
-		n_desc = 6;
-	} else {
-		n_desc = 5;
+	if (interrupt_ep) {
+		bytes += uvc_control_ep.bLength + uvc_control_cs_ep.bLength;
+		n_desc += 2;
+
+		if (speed == USB_SPEED_SUPER) {
+			bytes += uvc_ss_control_comp.bLength;
+			n_desc++;
+		}
 	}
 
 	for (src = (const struct usb_descriptor_header **)uvc_control_desc;
@@ -562,11 +569,13 @@ uvc_copy_descriptors(struct uvc_device *uvc, enum usb_device_speed speed)
 	uvc_control_header->bInCollection = 1;
 	uvc_control_header->baInterfaceNr[0] = uvc->streaming_intf;
 
-	UVC_COPY_DESCRIPTOR(mem, dst, &uvc_control_ep);
-	if (speed == USB_SPEED_SUPER)
-		UVC_COPY_DESCRIPTOR(mem, dst, &uvc_ss_control_comp);
+	if (interrupt_ep) {
+		UVC_COPY_DESCRIPTOR(mem, dst, &uvc_control_ep);
+		if (speed == USB_SPEED_SUPER)
+			UVC_COPY_DESCRIPTOR(mem, dst, &uvc_ss_control_comp);
 
-	UVC_COPY_DESCRIPTOR(mem, dst, &uvc_control_cs_ep);
+		UVC_COPY_DESCRIPTOR(mem, dst, &uvc_control_cs_ep);
+	}
 	UVC_COPY_DESCRIPTOR(mem, dst, &uvc_streaming_intf_alt0);
 
 	uvc_streaming_header = mem;
@@ -643,13 +652,21 @@ uvc_function_bind(struct usb_configuration *c, struct usb_function *f)
 		cpu_to_le16(max_packet_size * max_packet_mult *
 			    (opts->streaming_maxburst + 1));
 
-	/* Allocate endpoints. */
-	ep = usb_ep_autoconfig(cdev->gadget, &uvc_control_ep);
-	if (!ep) {
-		uvcg_info(f, "Unable to allocate control EP\n");
-		goto error;
+	/* No request is ever queued to the control interrupt endpoint: every
+	 * UVC event reaches userspace through v4l2_event_queue. UVC 1.1 makes
+	 * the endpoint optional, and on a dedicated-FIFO controller it costs a
+	 * whole IN endpoint to advertise a channel nothing writes to.
+	 */
+	uvc_control_intf.bNumEndpoints = opts->enable_interrupt_ep ? 1 : 0;
+	uvc->control_ep = NULL;
+	if (opts->enable_interrupt_ep) {
+		ep = usb_ep_autoconfig(cdev->gadget, &uvc_control_ep);
+		if (!ep) {
+			uvcg_info(f, "Unable to allocate control EP\n");
+			goto error;
+		}
+		uvc->control_ep = ep;
 	}
-	uvc->control_ep = ep;
 
 	if (gadget_is_superspeed(c->cdev->gadget))
 		ep = usb_ep_autoconfig_ss(cdev->gadget, &uvc_ss_streaming_ep,
@@ -857,6 +874,7 @@ static struct usb_function_instance *uvc_alloc_inst(void)
 		(const struct uvc_descriptor_header * const *)ctl_cls;
 
 	opts->streaming_interval = 1;
+	opts->enable_interrupt_ep = 1;
 	opts->streaming_maxpacket = 1024;
 
 	ret = uvcg_attach_configfs(opts);
