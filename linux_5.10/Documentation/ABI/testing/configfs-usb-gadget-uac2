@@ -12,3 +12,10 @@ Description:
 		p_srate    playback sampling rate
 		p_ssize    playback sample size (bytes)
 		=========  ============================
+
+What:		/sys/class/sound/card*/function_name
+Date:		August 2026
+Description:
+		Read-only configfs UAC2 function-instance name associated with the
+		ALSA card. The value is an exact name such as ``uac2.mic0``.
+		The attribute is absent for non-configfs and non-UAC2 cards.

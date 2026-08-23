@@ -596,6 +596,7 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
 	struct device *dev = &gadget->dev;
 	struct f_uac2_opts *uac2_opts;
 	struct usb_string *us;
+	const char *function_name;
 	int ret;
 
 	uac2_opts = container_of(fn->fi, struct f_uac2_opts, func_inst);
@@ -717,7 +718,9 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
 	agdev->params.c_srate = uac2_opts->c_srate;
 	agdev->params.c_ssize = uac2_opts->c_ssize;
 	agdev->params.req_number = uac2_opts->req_number;
-	ret = g_audio_setup(agdev, "UAC2 PCM", "UAC2_Gadget");
+	function_name = config_item_name(&uac2_opts->func_inst.group.cg_item);
+	ret = g_audio_setup_with_function_name(agdev, "UAC2 PCM",
+					       "UAC2_Gadget", function_name);
 	if (ret)
 		goto err_free_descs;
 	return 0;

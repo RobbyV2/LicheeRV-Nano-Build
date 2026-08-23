@@ -91,6 +91,7 @@ struct uac_rtd_params {
 
 struct snd_uac_chip {
 	struct g_audio *audio_dev;
+	char *function_name;
 
 	struct uac_rtd_params p_prm;
 	struct uac_rtd_params c_prm;
@@ -106,6 +107,26 @@ struct snd_uac_chip {
 	unsigned int p_pktsize;
 	unsigned int p_pktsize_residue;
 	unsigned int p_framesize;
+};
+
+static ssize_t function_name_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct snd_card *card = dev_to_snd_card(dev);
+	struct snd_uac_chip *uac = card->private_data;
+
+	return sysfs_emit(buf, "%s\n", uac->function_name);
+}
+
+static DEVICE_ATTR_RO(function_name);
+
+static struct attribute *uac_card_attrs[] = {
+	&dev_attr_function_name.attr,
+	NULL,
+};
+
+static const struct attribute_group uac_card_attr_group = {
+	.attrs = uac_card_attrs,
 };
 
 static const struct snd_pcm_hardware uac_pcm_hardware = {
@@ -528,8 +549,8 @@ void u_audio_stop_playback(struct g_audio *audio_dev)
 }
 EXPORT_SYMBOL_GPL(u_audio_stop_playback);
 
-int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
-					const char *card_name)
+static int __g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
+			   const char *card_name, const char *function_name)
 {
 	struct snd_uac_chip *uac;
 	struct snd_card *card;
@@ -546,6 +567,13 @@ int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
 		return -ENOMEM;
 	g_audio->uac = uac;
 	uac->audio_dev = g_audio;
+	if (function_name && function_name[0]) {
+		uac->function_name = kstrdup(function_name, GFP_KERNEL);
+		if (!uac->function_name) {
+			err = -ENOMEM;
+			goto fail;
+		}
+	}
 
 	params = &g_audio->params;
 	p_chmask = params->p_chmask;
@@ -602,6 +630,12 @@ int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
 		goto fail;
 
 	uac->card = card;
+	card->private_data = uac;
+	if (uac->function_name) {
+		err = snd_card_add_dev_attr(card, &uac_card_attr_group);
+		if (err < 0)
+			goto snd_fail;
+	}
 
 	/*
 	 * Create first PCM device
@@ -638,11 +672,27 @@ fail:
 	kfree(uac->c_prm.ureq);
 	kfree(uac->p_prm.rbuf);
 	kfree(uac->c_prm.rbuf);
+	kfree(uac->function_name);
 	kfree(uac);
 
 	return err;
 }
+
+int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
+		  const char *card_name)
+{
+	return __g_audio_setup(g_audio, pcm_name, card_name, NULL);
+}
 EXPORT_SYMBOL_GPL(g_audio_setup);
+
+int g_audio_setup_with_function_name(struct g_audio *g_audio,
+				     const char *pcm_name,
+				     const char *card_name,
+				     const char *function_name)
+{
+	return __g_audio_setup(g_audio, pcm_name, card_name, function_name);
+}
+EXPORT_SYMBOL_GPL(g_audio_setup_with_function_name);
 
 void g_audio_cleanup(struct g_audio *g_audio)
 {
@@ -661,6 +711,7 @@ void g_audio_cleanup(struct g_audio *g_audio)
 	kfree(uac->c_prm.ureq);
 	kfree(uac->p_prm.rbuf);
 	kfree(uac->c_prm.rbuf);
+	kfree(uac->function_name);
 	kfree(uac);
 }
 EXPORT_SYMBOL_GPL(g_audio_cleanup);

@@ -74,7 +74,11 @@ static inline uint num_channels(uint chanmask)
  * Returns zero on success, or a negative error on failure.
  */
 int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
-					const char *card_name);
+				  const char *card_name);
+int g_audio_setup_with_function_name(struct g_audio *g_audio,
+				     const char *pcm_name,
+				     const char *card_name,
+				     const char *function_name);
 void g_audio_cleanup(struct g_audio *g_audio);
 
 int u_audio_start_capture(struct g_audio *g_audio);
