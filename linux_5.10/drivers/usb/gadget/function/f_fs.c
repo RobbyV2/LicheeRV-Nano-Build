@@ -2132,6 +2132,12 @@ static int __must_check ffs_do_single_desc(char *data, unsigned len,
 		pr_vdebug("unimplemented descriptor: %d\n", _ds->bDescriptorType);
 		return -EINVAL;
 
+	case USB_DT_CS_INTERFACE:
+	case USB_DT_CS_ENDPOINT:
+		if (length < 3)
+			goto inv_length;
+		break;
+
 	default:
 		/* We should never be here */
 		pr_vdebug("unknown descriptor: %d\n", _ds->bDescriptorType);
