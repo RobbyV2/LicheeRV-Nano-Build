@@ -32,6 +32,7 @@ struct f_uac2_opts {
 	int				c_srate;
 	int				c_ssize;
 	int				req_number;
+	char				function_name[USB_MAX_STRING_LEN];
 	bool				bound;
 
 	struct mutex			lock;

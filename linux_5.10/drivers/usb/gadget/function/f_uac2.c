@@ -80,7 +80,7 @@ static char clksrc_in[8];
 static char clksrc_out[8];
 
 static struct usb_string strings_fn[] = {
-	[STR_ASSOC].s = "Source/Sink",
+	/* [STR_ASSOC].s = DYNAMIC, */
 	[STR_IF_CTRL].s = "Topology Control",
 	[STR_CLKSRC_IN].s = clksrc_in,
 	[STR_CLKSRC_OUT].s = clksrc_out,
@@ -601,6 +601,7 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
 
 	uac2_opts = container_of(fn->fi, struct f_uac2_opts, func_inst);
 
+	strings_fn[STR_ASSOC].s = uac2_opts->function_name;
 	us = usb_gstrings_attach(cdev, fn_strings, ARRAY_SIZE(strings_fn));
 	if (IS_ERR(us))
 		return PTR_ERR(us);
@@ -1028,6 +1029,45 @@ end:									\
 									\
 CONFIGFS_ATTR(f_uac2_opts_, name)
 
+#define UAC2_ATTRIBUTE_STRING(name)					\
+static ssize_t f_uac2_opts_##name##_show(struct config_item *item,	\
+					 char *page)			\
+{									\
+	struct f_uac2_opts *opts = to_f_uac2_opts(item);		\
+	int result;							\
+									\
+	mutex_lock(&opts->lock);					\
+	result = scnprintf(page, sizeof(opts->name), "%s", opts->name);	\
+	mutex_unlock(&opts->lock);					\
+									\
+	return result;							\
+}									\
+									\
+static ssize_t f_uac2_opts_##name##_store(struct config_item *item,	\
+					  const char *page, size_t len)	\
+{									\
+	struct f_uac2_opts *opts = to_f_uac2_opts(item);		\
+	int ret = len;							\
+									\
+	mutex_lock(&opts->lock);					\
+	if (opts->refcnt) {						\
+		ret = -EBUSY;						\
+		goto end;						\
+	}								\
+									\
+	if (len && page[len - 1] == '\n')				\
+		len--;							\
+									\
+	scnprintf(opts->name, min(sizeof(opts->name), len + 1),		\
+		  "%s", page);						\
+									\
+end:									\
+	mutex_unlock(&opts->lock);					\
+	return ret;							\
+}									\
+									\
+CONFIGFS_ATTR(f_uac2_opts_, name)
+
 UAC2_ATTRIBUTE(p_chmask);
 UAC2_ATTRIBUTE(p_srate);
 UAC2_ATTRIBUTE(p_ssize);
@@ -1035,6 +1075,7 @@ UAC2_ATTRIBUTE(c_chmask);
 UAC2_ATTRIBUTE(c_srate);
 UAC2_ATTRIBUTE(c_ssize);
 UAC2_ATTRIBUTE(req_number);
+UAC2_ATTRIBUTE_STRING(function_name);
 
 static struct configfs_attribute *f_uac2_attrs[] = {
 	&f_uac2_opts_attr_p_chmask,
@@ -1044,6 +1085,7 @@ static struct configfs_attribute *f_uac2_attrs[] = {
 	&f_uac2_opts_attr_c_srate,
 	&f_uac2_opts_attr_c_ssize,
 	&f_uac2_opts_attr_req_number,
+	&f_uac2_opts_attr_function_name,
 	NULL,
 };
 
@@ -1082,6 +1124,7 @@ static struct usb_function_instance *afunc_alloc_inst(void)
 	opts->c_srate = UAC2_DEF_CSRATE;
 	opts->c_ssize = UAC2_DEF_CSSIZE;
 	opts->req_number = UAC2_DEF_REQ_NUM;
+	scnprintf(opts->function_name, sizeof(opts->function_name), "Source/Sink");
 	return &opts->func_inst;
 }
 
