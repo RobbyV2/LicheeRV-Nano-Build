@@ -1,0 +1,14 @@
+ab_if=@IF@
+ab_dev=@DEV@
+ab_pre=@PRE@
+ab_cfg=config-sg2002_licheervnano_sd
+ab_good=boot.sd
+ab_alt=boot.alt
+ab_limit=1
+ab_state=@STATE@
+ab_args=setenv bootargs ${reserved_mem} ${root} ${mtdparts} console=${consoledev},${baudrate} ${othbootargs} nanokvm_slot=${ab_slot}
+ab_good_boot=setenv ab_slot good; run ab_args; fatload ${ab_if} ${ab_dev} ${uImage_addr} ${ab_good} && @BOOTM@ ${uImage_addr}#${ab_cfg}
+ab_alt_boot=setenv ab_slot trial; run ab_args; fatload ${ab_if} ${ab_dev} ${uImage_addr} ${ab_alt} && @BOOTM@ ${uImage_addr}#${ab_cfg}
+ab_bump=fatload ${ab_if} ${ab_dev} ${uImage_addr} bootcnt && setexpr ab_n *${uImage_addr} && setexpr ab_n ${ab_n} + 1 && mw.l ${uImage_addr} ${ab_n} && fatwrite ${ab_if} ${ab_dev} ${uImage_addr} bootcnt 4
+ab_try=if run ab_bump; then if test ${ab_n} -gt ${ab_limit}; then echo AB rollback; run ab_good_boot; else echo AB trial ${ab_n}; run ab_alt_boot; run ab_good_boot; fi; else echo AB bump failed; run ab_good_boot; fi
+sdboot=run ab_pre; if test "${ab_state}" = trial; then run ab_try; else run ab_good_boot; fi
