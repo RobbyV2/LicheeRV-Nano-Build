@@ -255,7 +255,8 @@ struct ffs_data {
 	unsigned short			strings_count;
 	unsigned short			interfaces_count;
 	unsigned short			eps_count;
-	unsigned short			_pad1;
+	/* bitmask of interfaces the descriptor block gives alternate settings */
+	unsigned short			alt_interfaces;
 
 	/* filled by __ffs_data_got_strings() */
 	/* ids in stringtabs are set in functionfs_bind() */

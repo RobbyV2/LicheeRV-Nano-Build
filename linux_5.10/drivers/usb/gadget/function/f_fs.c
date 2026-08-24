@@ -1809,6 +1809,7 @@ static void ffs_data_reset(struct ffs_data *ffs)
 	ffs->strings_count = 0;
 	ffs->interfaces_count = 0;
 	ffs->eps_count = 0;
+	ffs->alt_interfaces = 0;
 
 	ffs->ev.count = 0;
 
@@ -2218,6 +2219,9 @@ static int __ffs_data_do_entity(enum ffs_entity_type type,
 		 */
 		if (*valuep >= helper->interfaces_count)
 			helper->interfaces_count = *valuep + 1;
+		if (((struct usb_interface_descriptor *)desc)->bAlternateSetting &&
+		    *valuep < MAX_CONFIG_INTERFACES)
+			helper->ffs->alt_interfaces |= 1 << *valuep;
 		break;
 
 	case FFS_STRING:
@@ -3280,6 +3284,29 @@ static int ffs_func_get_alt(struct usb_function *f,
 	return (intf < 0) ? intf : func->cur_alt[interface];
 }
 
+/*
+ * Alternate 0 is the zero-bandwidth setting by definition, so a function whose
+ * descriptor block carries alternates has bandwidth exactly while one of those
+ * interfaces sits above it. Reporting that through ENABLE and DISABLE gives
+ * userspace the SET_INTERFACE edge that set_alt otherwise discards, generically
+ * for every isochronous class. A function with no alternates is always at 0 and
+ * must keep reading as enabled.
+ */
+static bool ffs_func_has_bandwidth(struct ffs_function *func)
+{
+	struct ffs_data *ffs = func->ffs;
+	unsigned i;
+
+	if (!ffs->alt_interfaces)
+		return true;
+	for (i = 0; i < ffs->interfaces_count && i < MAX_CONFIG_INTERFACES; ++i)
+		if ((ffs->alt_interfaces & (1 << i)) &&
+		    func->interfaces_nums[i] >= 0 &&
+		    func->cur_alt[func->interfaces_nums[i]] > 0)
+			return true;
+	return false;
+}
+
 static int ffs_func_set_alt(struct usb_function *f,
 			    unsigned interface, unsigned alt)
 {
@@ -3318,8 +3345,9 @@ static int ffs_func_set_alt(struct usb_function *f,
 	ffs->func = func;
 	ret = ffs_func_eps_enable(func);
 	if (likely(ret >= 0)) {
-		ffs_event_add(ffs, FUNCTIONFS_ENABLE);
 		func->cur_alt[interface] = alt;
+		ffs_event_add(ffs, ffs_func_has_bandwidth(func) ?
+			      FUNCTIONFS_ENABLE : FUNCTIONFS_DISABLE);
 	}
 	return ret;
 }
