@@ -6,6 +6,14 @@
 #ifndef __CONFIG_H
 #define __CONFIG_H
 
+#ifndef CONFIG_ENV_SIZE
+#define CONFIG_ENV_SIZE 0x2000
+#endif
+
+#ifndef CONFIG_SYS_TEXT_BASE
+#define CONFIG_SYS_TEXT_BASE 0
+#endif
+
 #ifdef FTRACE
 #define CONFIG_TRACE
 #define CONFIG_TRACE_BUFFER_SIZE	(16 << 20)

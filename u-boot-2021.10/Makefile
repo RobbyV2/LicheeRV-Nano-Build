@@ -823,7 +823,9 @@ libs-y += fs/
 libs-y += net/
 libs-y += disk/
 libs-y += drivers/
+ifndef CONFIG_SANDBOX
 libs-y += drivers/cvi_usb/
+endif
 libs-y += drivers/dma/
 libs-y += drivers/gpio/
 libs-y += drivers/net/
