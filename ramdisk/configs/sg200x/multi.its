@@ -29,7 +29,7 @@
 			type = "ramdisk";
 			arch = "arm64";
 			os = "linux";
-			compression = "gzip";
+			compression = "none";
 			load = <00000000>;
 			entry = <00000000>;
 			hash-1 {

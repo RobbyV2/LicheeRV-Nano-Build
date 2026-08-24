@@ -25,6 +25,12 @@ mkdir -pv ${output_dir}/input/
 mkdir -pv ${output_dir}/input/rawimages/
 cp -fv ${output_dir}/fip.bin ${output_dir}/input/
 cp -fv ${output_dir}/rawimages/boot.sd ${output_dir}/input/rawimages/
+# A/B kernel slots: boot.sd is the committed slot the stock u-boot env boots
+# unaided, boot.alt is the trial slot an OTA writes. Both are populated now so
+# the partition is proven to hold two slots before any update runs.
+cp -fv ${output_dir}/rawimages/boot.sd ${output_dir}/input/boot.alt
+${THISDIR}/../../../../scripts/ab/mkuenv.sh committed ${output_dir}/input/uEnv.txt
+printf '\0\0\0\0' > ${output_dir}/input/bootcnt
 cp -fv ${output_dir}/rawimages/rootfs.sd ${output_dir}/input/
 touch ${output_dir}/input/usb.dev
 touch ${output_dir}/input/usb.disk0
