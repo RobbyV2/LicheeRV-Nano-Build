@@ -312,7 +312,7 @@ run_step "create kernel module and init target directories" install -d "$MOUNT_D
 run_step "install soph_mipi_rx.ko" install -m 755 "$SCRIPT_DIR/kvmapp/system/ko/soph_mipi_rx.ko" "$MOUNT_DIR/mnt/system/ko/soph_mipi_rx.ko"
 need_file "$MOUNT_DIR/mnt/system/ko/soph_mipi_rx.ko"
 
-for script in S00kmod S01fs S03usbdev S15kvmhwd S30eth S30wifi S95nanokvm; do
+for script in S00kmod S01fs S02abtrial S03usbdev S15kvmhwd S30eth S30wifi S95nanokvm; do
     need_file "$SCRIPT_DIR/kvmapp/system/init.d/$script"
     run_step "install init script: $script" install -m 755 "$SCRIPT_DIR/kvmapp/system/init.d/$script" "$MOUNT_DIR/etc/init.d/$script"
     need_exec "$MOUNT_DIR/etc/init.d/$script"
