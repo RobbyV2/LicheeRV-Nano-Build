@@ -255,6 +255,7 @@ static int ep_show(struct seq_file *seq, void *v)
 	seq_puts(seq, "\n");
 	seq_printf(seq, "mps %d\n", ep->ep.maxpacket);
 	seq_printf(seq, "total_data=%ld\n", ep->total_data);
+	seq_printf(seq, "isoc_flushed=%u\n", ep->isoc_flushed);
 
 	seq_printf(seq, "request list (%p,%p):\n",
 		   ep->queue.next, ep->queue.prev);

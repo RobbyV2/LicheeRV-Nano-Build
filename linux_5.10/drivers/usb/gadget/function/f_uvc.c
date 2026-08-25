@@ -931,6 +931,7 @@ static void uvc_unbind(struct usb_configuration *c, struct usb_function *f)
 	uvcg_info(f, "%s\n", __func__);
 
 	device_remove_file(&uvc->vdev.dev, &dev_attr_function_name);
+	uvcg_video_exit(&uvc->video);
 	video_unregister_device(&uvc->vdev);
 	v4l2_device_unregister(&uvc->v4l2_dev);
 

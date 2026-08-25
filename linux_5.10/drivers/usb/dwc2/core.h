@@ -172,6 +172,11 @@ struct dwc2_hsotg_ep {
 	unsigned int            isochronous:1;
 	unsigned int            send_zlp:1;
 	unsigned int            target_frame;
+	/* Descriptors the core declined to send. Counted because a flushed
+	 * isochronous descriptor still completes with status 0, so the loss
+	 * is otherwise invisible to everything above the driver.
+	 */
+	unsigned int            isoc_flushed;
 #define TARGET_FRAME_INITIAL   0xFFFFFFFF
 	bool			frame_overrun;
 

@@ -65,7 +65,15 @@ extern unsigned int uvc_gadget_trace_param;
  * Driver specific constants
  */
 
-#define UVC_NUM_REQUESTS			4
+/* How many isochronous IN requests may be in flight at once. Four is the
+ * upstream default and it is not enough here: a 3285 byte frame is five
+ * payloads at a 768 byte microframe, so the endpoint runs dry inside every
+ * single frame and the refill has to win a 125us race to keep it fed. The
+ * same lever on the OUT side - f_uac2's req_number, raised from 4 to 8 - cut
+ * duplicated audio blocks from 60.5% to 26.3%, so give the video IN endpoint
+ * the same headroom and more. At 768 bytes a request this costs 12 KB.
+ */
+#define UVC_NUM_REQUESTS			16
 #define UVC_MAX_REQUEST_SIZE			64
 #define UVC_MAX_EVENTS				4
 
@@ -78,6 +86,22 @@ struct uvc_video {
 	struct usb_ep *ep;
 
 	struct work_struct pump;
+	/* The pump refills the isochronous endpoint, and every microframe it
+	 * misses is a payload the host never sees. On the shared system
+	 * workqueue it queues behind whatever else this single core is doing,
+	 * so it gets a dedicated high-priority one of its own.
+	 */
+	struct workqueue_struct *async_wq;
+
+	/* dwc2 completes an isochronous IN request that missed its microframe
+	 * with status 0 and a short actual, so a lost payload leaves no trace at
+	 * all. Count what was queued against what actually went out, so a run
+	 * that is fixed can be told apart from a run that was lucky.
+	 */
+	unsigned int req_queued;
+	unsigned int req_short;
+	unsigned int bytes_queued;
+	unsigned int bytes_sent;
 
 	/* Frame parameters */
 	u8 bpp;

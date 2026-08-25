@@ -190,6 +190,21 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 	struct uvc_video_queue *queue = &video->queue;
 	unsigned long flags;
 
+	video->req_queued++;
+	video->bytes_queued += req->length;
+	video->bytes_sent += req->actual;
+	if (req->status == 0 && req->actual < req->length) {
+		video->req_short++;
+		/* Rate limited because a bad second produces thirty of these
+		 * and the log is the only channel this board has.
+		 */
+		if (printk_ratelimit())
+			uvcg_info(&video->uvc->func,
+				  "VS short IN: %u of %u bytes, %u short of %u requests\n",
+				  req->actual, req->length,
+				  video->req_short, video->req_queued);
+	}
+
 	switch (req->status) {
 	case 0:
 		break;
@@ -210,7 +225,7 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 	list_add_tail(&req->list, &video->req_free);
 	spin_unlock_irqrestore(&video->req_lock, flags);
 
-	schedule_work(&video->pump);
+	queue_work(video->async_wq, &video->pump);
 }
 
 static int
@@ -384,6 +399,10 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 	}
 
 	if (!enable) {
+		uvcg_info(&video->uvc->func,
+			  "VS stream stats: %u requests, %u short, %u of %u bytes sent\n",
+			  video->req_queued, video->req_short,
+			  video->bytes_sent, video->bytes_queued);
 		cancel_work_sync(&video->pump);
 		uvcg_queue_cancel(&video->queue, 0);
 
@@ -395,6 +414,11 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 		uvcg_queue_enable(&video->queue, 0);
 		return 0;
 	}
+
+	video->req_queued = 0;
+	video->req_short = 0;
+	video->bytes_queued = 0;
+	video->bytes_sent = 0;
 
 	if ((ret = uvcg_queue_enable(&video->queue, 1)) < 0)
 		return ret;
@@ -408,7 +432,7 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 	} else
 		video->encode = uvc_video_encode_isoc;
 
-	schedule_work(&video->pump);
+	queue_work(video->async_wq, &video->pump);
 
 	return ret;
 }
@@ -422,6 +446,17 @@ int uvcg_video_init(struct uvc_video *video, struct uvc_device *uvc)
 	spin_lock_init(&video->req_lock);
 	INIT_WORK(&video->pump, uvcg_video_pump);
 
+	/* Refilling the endpoint is deadline work: a request that is not queued
+	 * before its microframe is a payload the host never receives, and
+	 * isochronous has no retransmit to recover it. The shared system
+	 * workqueue puts that refill behind every other work item this single
+	 * core has pending, so the stream gets a workqueue of its own that is
+	 * unbound (any CPU may run it) and high priority.
+	 */
+	video->async_wq = alloc_workqueue("uvcgadget", WQ_UNBOUND | WQ_HIGHPRI, 0);
+	if (!video->async_wq)
+		return -ENOMEM;
+
 	video->uvc = uvc;
 	video->fcc = V4L2_PIX_FMT_YUYV;
 	video->bpp = 16;
@@ -433,5 +468,20 @@ int uvcg_video_init(struct uvc_video *video, struct uvc_device *uvc)
 	uvcg_queue_init(&video->queue, V4L2_BUF_TYPE_VIDEO_OUTPUT,
 			&video->mutex);
 	return 0;
+}
+
+/*
+ * Tear the video stream's workqueue down. The gadget is rebound whenever the
+ * presentation profile changes, so a workqueue left behind by an unbind is
+ * leaked once per profile change rather than once per boot.
+ */
+void uvcg_video_exit(struct uvc_video *video)
+{
+	if (!video->async_wq)
+		return;
+
+	cancel_work_sync(&video->pump);
+	destroy_workqueue(video->async_wq);
+	video->async_wq = NULL;
 }
 

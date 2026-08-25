@@ -1470,6 +1470,33 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 				WARN_ON(hs_req->req.num_sgs > 1);
 				dma_addr = sg_dma_address(hs_req->req.sg);
 			}
+
+			/*
+			 * An IN descriptor carries the microframe it is to go
+			 * out in, and target_frame only ever advances by one
+			 * per descriptor filled. That is right while the
+			 * endpoint is busy and wrong the moment it goes idle:
+			 * target_frame stops where the last burst left it
+			 * while the bus keeps counting, so the next burst is
+			 * stamped for microframes that have already gone by.
+			 * The core flushes those descriptors, and a flushed
+			 * descriptor still completes with status 0, so the
+			 * payload disappears without a trace. A UVC gadget
+			 * goes idle between every video frame - 264 idle
+			 * microframes at 30fps - which is why one payload per
+			 * frame kept vanishing. Catch target_frame up to the
+			 * bus before stamping anything.
+			 */
+			if (hs_ep->dir_in) {
+				hs->frame_number =
+					dwc2_hsotg_read_frameno(hs);
+				if (dwc2_gadget_target_frame_elapsed(hs_ep)) {
+					hs_ep->target_frame =
+						hs->frame_number;
+					dwc2_gadget_incr_frame_num(hs_ep);
+				}
+			}
+
 			dwc2_gadget_fill_isoc_desc(hs_ep, dma_addr,
 						   hs_req->req.length);
 		}
@@ -2222,6 +2249,23 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 			ureq->frame_number =
 				(desc_sts & DEV_DMA_ISOC_FRNUM_MASK) >>
 				DEV_DMA_ISOC_FRNUM_SHIFT;
+		} else {
+			/*
+			 * Nothing went out. Requests are recycled by their
+			 * owners, so actual still holds the byte count of
+			 * whatever this request carried last time, and
+			 * leaving it there reports a flushed descriptor as a
+			 * full transfer. Say plainly that it moved nothing,
+			 * so a caller that compares actual against length can
+			 * see the loss it is otherwise blind to.
+			 */
+			ureq->actual = 0;
+			hs_ep->isoc_flushed++;
+			dev_dbg(hsotg->dev,
+				"%s: ep%d isoc desc not sent, sts %d\n",
+				__func__, hs_ep->index,
+				(desc_sts & DEV_DMA_STS_MASK) >>
+				DEV_DMA_STS_SHIFT);
 		}
 
 		dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, 0);
