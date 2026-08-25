@@ -381,22 +381,33 @@ uvc_function_disable(struct usb_function *f)
  * Connection / disconnection
  */
 
+/*
+ * Upstream keeps the whole gadget off the bus until something opens the V4L2
+ * node, so a webcam never enumerates before an application can serve frames.
+ * That is right for a dedicated camera and wrong for a composite device: the
+ * deactivation is gadget-wide, so on this KVM a linked camera also took away
+ * the keyboard, the mouse, the USB NIC and the virtual disk, and it took them
+ * away for as long as no process held the node - which includes every moment
+ * the userspace daemon is restarting, updating or has crashed.
+ *
+ * An operator whose camera shows nothing has a camera to fix. An operator whose
+ * keyboard is gone cannot fix anything, and on a remote KVM cannot even reach
+ * the machine to try. So this fork does not let a camera arm that mechanism:
+ * bind_deactivated stays clear and these two become the no-ops that pairs with
+ * it, since activate/deactivate are counted and a lone activate would warn and
+ * a lone deactivate would leak a deactivation nothing can ever clear.
+ *
+ * The cost is that the host may open the camera before frames are ready and see
+ * an empty stream for a moment. The gadget answers, so it recovers by itself.
+ */
 void
 uvc_function_connect(struct uvc_device *uvc)
 {
-	int ret;
-
-	if ((ret = usb_function_activate(&uvc->func)) < 0)
-		uvcg_info(&uvc->func, "UVC connect failed with %d\n", ret);
 }
 
 void
 uvc_function_disconnect(struct uvc_device *uvc)
 {
-	int ret;
-
-	if ((ret = usb_function_deactivate(&uvc->func)) < 0)
-		uvcg_info(&uvc->func, "UVC disconnect failed with %d\n", ret);
 }
 
 /* --------------------------------------------------------------------------
@@ -962,7 +973,7 @@ static struct usb_function *uvc_alloc(struct usb_function_instance *fi)
 	uvc->func.disable = uvc_function_disable;
 	uvc->func.setup = uvc_function_setup;
 	uvc->func.free_func = uvc_free;
-	uvc->func.bind_deactivated = true;
+	/* See uvc_function_connect(): a camera must not take the bus away. */
 
 	return &uvc->func;
 }
