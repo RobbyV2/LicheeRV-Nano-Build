@@ -430,6 +430,21 @@ uvc_register_video(struct uvc_device *uvc)
 	struct usb_composite_dev *cdev = uvc->func.config->cdev;
 	int ret;
 
+	/*
+	 * The same uvc_device is bound again whenever the controller is rebound
+	 * without the function being freed, and video_register_device
+	 * initialises the embedded struct device every time it is called.
+	 * Running that over the kobject the previous bind left behind is what
+	 * the core reports as "tried to init an initialized object", and it
+	 * does not stop there: it corrupts the slab, and the next allocation -
+	 * f_uac2 building its sound card - faults dereferencing the string
+	 * "video". The release callback is video_device_release_empty, so
+	 * nothing frees this struct for us and nothing still refers to it once
+	 * video_unregister_device has returned. Clearing it is what makes the
+	 * second bind safe; every field it needs is assigned immediately below.
+	 */
+	memset(&uvc->vdev, 0, sizeof(uvc->vdev));
+
 	/* TODO reference counting. */
 	uvc->vdev.v4l2_dev = &uvc->v4l2_dev;
 	uvc->vdev.fops = &uvc_v4l2_fops;
