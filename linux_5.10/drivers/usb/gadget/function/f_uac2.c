@@ -843,12 +843,6 @@ err_free_descs:
 static int
 afunc_set_alt(struct usb_function *fn, unsigned intf, unsigned alt)
 {
-	{
-		struct g_audio *ga = func_to_g_audio(fn);
-
-		dev_info(&ga->gadget->dev, "uac2 set_alt(%u, %u)\n", intf, alt);
-	}
-
 	struct usb_composite_dev *cdev = fn->config->cdev;
 	struct f_uac2 *uac2 = func_to_uac2(fn);
 	struct usb_gadget *gadget = cdev->gadget;
@@ -1071,13 +1065,6 @@ afunc_setup(struct usb_function *fn, const struct usb_ctrlrequest *cr)
 	else
 		dev_err(&agdev->gadget->dev, "%s:%d Error!\n",
 				__func__, __LINE__);
-
-	/* Investigation aid: the conversation with the host, read not inferred. */
-	dev_info(&agdev->gadget->dev,
-		 "uac2 setup: type=%02x req=%02x cs=%u entity=%u intf=%u wLength=%u -> %d\n",
-		 cr->bRequestType, cr->bRequest, le16_to_cpu(cr->wValue) >> 8,
-		 le16_to_cpu(cr->wIndex) >> 8, le16_to_cpu(cr->wIndex) & 0xff,
-		 w_length, value);
 
 	if (value >= 0) {
 		req->length = value;
