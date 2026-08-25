@@ -2226,24 +2226,6 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 
 		dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, 0);
 
-		/*
-		 * Retire the descriptor as it is consumed. Nothing else clears
-		 * the buffer status: a descriptor keeps DMA-done until its next
-		 * fill arms it, and the ring is far longer than the requests
-		 * circulating in it, so a completion that reaches an entry the
-		 * function has not re-queued yet reads a done left over from
-		 * the previous lap and gives the function that request a second
-		 * time. The buffer still holds what it carried req_number
-		 * service intervals ago, which a UAC2 sink writes into its ALSA
-		 * ring as an exact repeat of the audio from req_number
-		 * milliseconds earlier. Measured against a Windows host playing
-		 * a 1025 Hz tone: one 1 ms block in every 5.6 was byte
-		 * identical to the block 4 before it, with req_number 4, and
-		 * the distance followed req_number when it was changed.
-		 */
-		hs_ep->desc_list[hs_ep->compl_desc].status &=
-			~DEV_DMA_BUFF_STS_MASK;
-
 		hs_ep->compl_desc++;
 		if (hs_ep->compl_desc > (MAX_DMA_DESC_NUM_HS_ISOC - 1))
 			hs_ep->compl_desc = 0;
