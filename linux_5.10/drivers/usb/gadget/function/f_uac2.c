@@ -541,8 +541,16 @@ static void set_ep_max_packet_size(const struct f_uac2_opts *uac2_opts,
 		ssize = uac2_opts->c_ssize;
 	}
 
+	/*
+	 * One sample of headroom, not a rounded-up interval. These endpoints
+	 * are asynchronous, so the sink and the source disagree slightly on
+	 * where a millisecond ends and an interval occasionally has to carry
+	 * an extra frame. Sizing to exactly srate/1000 leaves nowhere to put
+	 * it, and a host that derives the achievable rate from wMaxPacketSize
+	 * concludes the endpoint cannot sustain the rate we advertise.
+	 */
 	max_packet_size = num_channels(chmask) * ssize *
-		DIV_ROUND_UP(srate, factor / (1 << (ep_desc->bInterval - 1)));
+		(srate / (factor / (1 << (ep_desc->bInterval - 1))) + 1);
 	ep_desc->wMaxPacketSize = cpu_to_le16(min_t(u16, max_packet_size,
 				le16_to_cpu(ep_desc->wMaxPacketSize)));
 }
