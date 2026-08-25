@@ -2199,11 +2199,24 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 			ureq->actual = ureq->length - ((desc_sts & mask) >>
 				DEV_DMA_ISOC_NBYTES_SHIFT);
 
-			/* Adjust actual len for ISOC Out if len is
-			 * not align of 4
+			/*
+			 * No misalignment adjustment. Upstream adds the
+			 * buffer's remainder back on here, for a core that
+			 * reports the untransferred count rounded down to a
+			 * DWORD; this one reports it exactly. Measured on a
+			 * UAC2 OUT endpoint of 98 bytes - an odd number of
+			 * 16-bit frames, because an asynchronous sink is
+			 * sized with one sample of headroom - a host sending
+			 * the nominal 96 leaves 2 behind, and the adjustment
+			 * turned that into 98. The gadget then credited its
+			 * ALSA capture ring a 49th frame every millisecond:
+			 * the ring advanced at 49000 frames per second rather
+			 * than 48000, every 49th sample was whatever the
+			 * request buffer already held, and the target host's
+			 * audio reached the browser with a buzz on top of it.
+			 * The adjustment can also take actual past length,
+			 * which no caller expects.
 			 */
-			if (!hs_ep->dir_in && ureq->length & 0x3)
-				ureq->actual += 4 - (ureq->length & 0x3);
 
 			/* Set actual frame number for completed transfers */
 			ureq->frame_number =
