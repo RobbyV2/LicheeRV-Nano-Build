@@ -284,13 +284,30 @@ static struct uac2_format_type_i_descriptor as_out_fmt1_desc = {
 	.bFormatType = UAC_FORMAT_TYPE_I,
 };
 
+/*
+ * Adaptive rather than asynchronous, for the OUT direction only.
+ *
+ * USB 2.0 5.12.4.1 requires an isochronous feedback endpoint alongside an
+ * asynchronous isochronous OUT endpoint, so the host can be told the sink's
+ * real rate. This f_uac2 has no feedback endpoint and no way to configure one -
+ * there is no fb_max here - so an async sink is a device the specification says
+ * is incomplete. Linux hosts accept it anyway; Windows' inbox usbaudio2 does
+ * not, and refuses to start the function with CM_PROB_FAILED_START, which is a
+ * speaker that appears in Device Manager and never plays.
+ *
+ * An adaptive sink implies no feedback endpoint at all: it is the device that
+ * adapts to whatever rate the host sends. u_audio already buffers into an ALSA
+ * ring and drops or pads on over- and underrun, which is exactly the behaviour
+ * an adaptive sink is allowed to have. It costs no IN endpoint either, and on
+ * this controller all six are already spoken for.
+ */
 /* STD AS ISO OUT Endpoint */
 static struct usb_endpoint_descriptor fs_epout_desc = {
 	.bLength = USB_DT_ENDPOINT_SIZE,
 	.bDescriptorType = USB_DT_ENDPOINT,
 
 	.bEndpointAddress = USB_DIR_OUT,
-	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC,
+	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ADAPTIVE,
 	.wMaxPacketSize = cpu_to_le16(1023),
 	.bInterval = 1,
 };
@@ -299,7 +316,7 @@ static struct usb_endpoint_descriptor hs_epout_desc = {
 	.bLength = USB_DT_ENDPOINT_SIZE,
 	.bDescriptorType = USB_DT_ENDPOINT,
 
-	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ASYNC,
+	.bmAttributes = USB_ENDPOINT_XFER_ISOC | USB_ENDPOINT_SYNC_ADAPTIVE,
 	.wMaxPacketSize = cpu_to_le16(1024),
 	.bInterval = 4,
 };
