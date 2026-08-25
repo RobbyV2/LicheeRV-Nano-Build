@@ -1706,6 +1706,10 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 			fallthrough;
 		case USB_DT_CONFIG:
 			value = config_desc(cdev, w_value);
+			/* Investigation aid: the bytes the host actually parses. */
+			if (value > 9)
+				print_hex_dump(KERN_INFO, "usbcfg: ", DUMP_PREFIX_OFFSET,
+					       16, 1, req->buf, value, false);
 			if (value >= 0)
 				value = min(w_length, (u16) value);
 			break;
