@@ -1038,6 +1038,21 @@ afunc_setup(struct usb_function *fn, const struct usb_ctrlrequest *cr)
 		dev_err(&agdev->gadget->dev, "%s:%d Error!\n",
 				__func__, __LINE__);
 
+	/*
+	 * Every class request and what we answered, so the conversation with the
+	 * host can be read rather than inferred. Five descriptor-shaped theories
+	 * about why Windows will not start this function have each moved the
+	 * failure code and none has fixed it; this turns that guessing into
+	 * observation. entity is the addressed unit, cs the control selector.
+	 */
+	dev_info(&agdev->gadget->dev,
+		 "uac2 setup: bmRequestType=%02x bRequest=%02x cs=%u entity=%u intf=%u wLength=%u -> %d\n",
+		 cr->bRequestType, cr->bRequest,
+		 le16_to_cpu(cr->wValue) >> 8,
+		 (le16_to_cpu(cr->wIndex) >> 8) & 0xff,
+		 le16_to_cpu(cr->wIndex) & 0xff,
+		 w_length, value);
+
 	if (value >= 0) {
 		req->length = value;
 		req->zero = value < w_length;
