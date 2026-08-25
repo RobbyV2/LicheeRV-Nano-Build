@@ -1073,7 +1073,20 @@ afunc_setup(struct usb_function *fn, const struct usb_ctrlrequest *cr)
 	if (value >= 0) {
 		req->length = value;
 		req->zero = value < w_length;
-		value = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
+		/*
+		 * Whether the answer actually left the controller, not just what we
+		 * meant to answer. The reply bytes are already known good, so if
+		 * Windows still calls this range not found, the next place to look is
+		 * the transfer itself.
+		 */
+		{
+			int queued = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
+
+			dev_info(&agdev->gadget->dev,
+				 "uac2 ep0 queue: len=%d zero=%d wLength=%u -> %d\n",
+				 req->length, req->zero, w_length, queued);
+			value = queued;
+		}
 		if (value < 0) {
 			dev_err(&agdev->gadget->dev,
 				"%s:%d Error!\n", __func__, __LINE__);
