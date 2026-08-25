@@ -2245,10 +2245,28 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 static void dwc2_gadget_handle_isoc_bna(struct dwc2_hsotg_ep *hs_ep)
 {
 	struct dwc2_hsotg *hsotg = hs_ep->parent;
+	int i;
 
 	if (!hs_ep->dir_in)
 		dwc2_flush_rx_fifo(hsotg);
 	dwc2_hsotg_complete_request(hsotg, hs_ep, get_ep_head(hs_ep), 0);
+
+	/*
+	 * Retire the chain along with the indices into it. Resetting the
+	 * indices without it leaves every descriptor holding the DMA-done
+	 * status from the previous lap, and a completion interrupt arriving
+	 * before dwc2_gadget_start_isoc_ddma() rebuilds the chain walks them
+	 * from zero and gives the function requests whose buffers still hold
+	 * what they carried req_number service intervals ago. On a UAC2 sink
+	 * that is an exact repeat of the target host's audio from req_number
+	 * milliseconds earlier: measured with req_number 4, one 1 ms block in
+	 * every 5.6 was byte identical to the block 4 before it, and the
+	 * distance followed req_number when it was changed. This marks them
+	 * host-busy exactly as the rebuild's own first loop does.
+	 */
+	for (i = 0; i < MAX_DMA_DESC_NUM_HS_ISOC; i++)
+		hs_ep->desc_list[i].status = DEV_DMA_BUFF_STS_HBUSY
+					     << DEV_DMA_BUFF_STS_SHIFT;
 
 	hs_ep->target_frame = TARGET_FRAME_INITIAL;
 	hs_ep->next_desc = 0;
