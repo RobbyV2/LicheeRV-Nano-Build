@@ -200,6 +200,43 @@ static struct uac2_input_terminal_descriptor io_in_it_desc = {
 	.bmControls = cpu_to_le16(CONTROL_RDWR << COPY_CTRL),
 };
 
+/*
+ * Feature Unit for the USB_IN (microphone) path.
+ *
+ * Upstream 5.10 wires the input terminal straight to the output terminal, so
+ * the audio topology this gadget presents is IT -> OT with nothing between
+ * them. That is legal UAC2 but incomplete, and Windows' inbox usbaudio2
+ * declines to start such a function: CM_PROB_FAILED_START with an NTSTATUS in
+ * FACILITY_AUDIO_KERNEL, from the audio stack rather than the USB stack. The
+ * failure also moves with the descriptor content - mono and stereo produce
+ * different codes - which is what says the host is parsing this topology and
+ * objecting to it.
+ *
+ * A Feature Unit that declares no controls is the smallest thing that completes
+ * the chain to IT -> FU -> OT. bmaControls carries one entry for the master
+ * channel plus one per logical channel; both are zero here, so the host is told
+ * the unit exists and offers nothing, which needs no request handling behind it.
+ * Volume and mute are a later upstream series and a separate change.
+ */
+static struct {
+	__u8 bLength;
+	__u8 bDescriptorType;
+	__u8 bDescriptorSubtype;
+	__u8 bUnitID;
+	__u8 bSourceID;
+	__le32 bmaControls[2];
+	__u8 iFeature;
+} __attribute__((packed)) in_feature_unit_desc = {
+	.bLength = sizeof in_feature_unit_desc,
+	.bDescriptorType = USB_DT_CS_INTERFACE,
+
+	.bDescriptorSubtype = UAC_FEATURE_UNIT,
+	/* .bUnitID = DYNAMIC */
+	/* .bSourceID = DYNAMIC */
+	.bmaControls = { cpu_to_le32(0), cpu_to_le32(0) },
+	.iFeature = 0,
+};
+
 /* Ouput Terminal for USB_IN */
 static struct uac2_output_terminal_descriptor usb_in_ot_desc = {
 	.bLength = sizeof usb_in_ot_desc,
@@ -524,9 +561,13 @@ static void setup_descriptor(struct f_uac2_opts *opts)
 		out_clk_src_desc.bClockID = i++;
 	if (EPIN_EN(opts))
 		in_clk_src_desc.bClockID = i++;
+	/* The feature unit is an entity like any other and needs its own ID. */
+	if (EPIN_EN(opts))
+		in_feature_unit_desc.bUnitID = i++;
 
 	usb_out_it_desc.bCSourceID = out_clk_src_desc.bClockID;
-	usb_in_ot_desc.bSourceID = io_in_it_desc.bTerminalID;
+	in_feature_unit_desc.bSourceID = io_in_it_desc.bTerminalID;
+	usb_in_ot_desc.bSourceID = in_feature_unit_desc.bUnitID;
 	usb_in_ot_desc.bCSourceID = in_clk_src_desc.bClockID;
 	io_in_it_desc.bCSourceID = in_clk_src_desc.bClockID;
 	io_out_ot_desc.bCSourceID = out_clk_src_desc.bClockID;
@@ -543,6 +584,7 @@ static void setup_descriptor(struct f_uac2_opts *opts)
 		len += sizeof(in_clk_src_desc);
 		len += sizeof(usb_in_ot_desc);
 		len += sizeof(io_in_it_desc);
+		len += sizeof(in_feature_unit_desc);
 		ac_hdr_desc.wTotalLength = cpu_to_le16(len);
 		iad_desc.bInterfaceCount++;
 	}
@@ -568,6 +610,7 @@ static void setup_descriptor(struct f_uac2_opts *opts)
 	}
 	if (EPIN_EN(opts)) {
 		fs_audio_desc[i++] = USBDHDR(&io_in_it_desc);
+		fs_audio_desc[i++] = USBDHDR(&in_feature_unit_desc);
 		fs_audio_desc[i++] = USBDHDR(&usb_in_ot_desc);
 	}
 	if (EPOUT_EN(opts)) {
@@ -601,6 +644,7 @@ static void setup_descriptor(struct f_uac2_opts *opts)
 	}
 	if (EPIN_EN(opts)) {
 		hs_audio_desc[i++] = USBDHDR(&io_in_it_desc);
+		hs_audio_desc[i++] = USBDHDR(&in_feature_unit_desc);
 		hs_audio_desc[i++] = USBDHDR(&usb_in_ot_desc);
 	}
 	if (EPOUT_EN(opts)) {
