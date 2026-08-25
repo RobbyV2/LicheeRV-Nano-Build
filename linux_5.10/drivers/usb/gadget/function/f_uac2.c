@@ -526,7 +526,7 @@ struct cntrl_range_lay3 {
 
 static void set_ep_max_packet_size(const struct f_uac2_opts *uac2_opts,
 	struct usb_endpoint_descriptor *ep_desc,
-	unsigned int factor, bool is_playback)
+	unsigned int factor, bool is_playback, u16 max_size_ep)
 {
 	int chmask, srate, ssize;
 	u16 max_packet_size;
@@ -542,6 +542,18 @@ static void set_ep_max_packet_size(const struct f_uac2_opts *uac2_opts,
 	}
 
 	/*
+	 * Every instance of this function shares these descriptors, so a
+	 * direction this instance does not use must be left alone rather than
+	 * sized from an empty channel mask. Sizing it to zero and then
+	 * clamping the next instance against the value left behind made the
+	 * result monotonically decreasing: a microphone (c_chmask 0) zeroed
+	 * the OUT endpoint, and the speaker that bound afterwards inherited
+	 * the zero and could carry nothing.
+	 */
+	if (!chmask)
+		return;
+
+	/*
 	 * One sample of headroom, not a rounded-up interval. These endpoints
 	 * are asynchronous, so the sink and the source disagree slightly on
 	 * where a millisecond ends and an interval occasionally has to carry
@@ -551,8 +563,9 @@ static void set_ep_max_packet_size(const struct f_uac2_opts *uac2_opts,
 	 */
 	max_packet_size = num_channels(chmask) * ssize *
 		(srate / (factor / (1 << (ep_desc->bInterval - 1))) + 1);
+	/* Clamp to what the endpoint can express, not to the last bind. */
 	ep_desc->wMaxPacketSize = cpu_to_le16(min_t(u16, max_packet_size,
-				le16_to_cpu(ep_desc->wMaxPacketSize)));
+						    max_size_ep));
 }
 
 /* Use macro to overcome line length limitation */
@@ -767,10 +780,10 @@ afunc_bind(struct usb_configuration *cfg, struct usb_function *fn)
 	}
 
 	/* Calculate wMaxPacketSize according to audio bandwidth */
-	set_ep_max_packet_size(uac2_opts, &fs_epin_desc, 1000, true);
-	set_ep_max_packet_size(uac2_opts, &fs_epout_desc, 1000, false);
-	set_ep_max_packet_size(uac2_opts, &hs_epin_desc, 8000, true);
-	set_ep_max_packet_size(uac2_opts, &hs_epout_desc, 8000, false);
+	set_ep_max_packet_size(uac2_opts, &fs_epin_desc, 1000, true, 1023);
+	set_ep_max_packet_size(uac2_opts, &fs_epout_desc, 1000, false, 1023);
+	set_ep_max_packet_size(uac2_opts, &hs_epin_desc, 8000, true, 1024);
+	set_ep_max_packet_size(uac2_opts, &hs_epout_desc, 8000, false, 1024);
 
 	if (EPOUT_EN(uac2_opts)) {
 		agdev->out_ep = usb_ep_autoconfig(gadget, &fs_epout_desc);
