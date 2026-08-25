@@ -964,6 +964,23 @@ in_rq_range(struct usb_function *fn, const struct usb_ctrlrequest *cr)
 
 		value = min_t(unsigned, w_length, sizeof r);
 		memcpy(req->buf, &r, value);
+
+		/*
+		 * The bytes as they will go on the wire. Windows asks this exactly
+		 * once, gets our answer, and stops with STATUS_RANGE_NOT_FOUND - so
+		 * the reply itself is what it refuses, and reading the source has
+		 * already been wrong five times about why. UAC2 5.2.3.3 layout 3 is
+		 * wNumSubRanges(2) then dMIN/dMAX/dRES(4 each), all little-endian.
+		 */
+		{
+			u8 *b = req->buf;
+
+			dev_info(&agdev->gadget->dev,
+				 "uac2 range reply srate=%d len=%d bytes=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				 (entity_id == USB_IN_CLK_ID) ? p_srate : c_srate, value,
+				 b[0], b[1], b[2], b[3], b[4], b[5], b[6],
+				 b[7], b[8], b[9], b[10], b[11], b[12], b[13]);
+		}
 	} else {
 		dev_err(&agdev->gadget->dev,
 			"%s:%d control_selector=%d TODO!\n",
