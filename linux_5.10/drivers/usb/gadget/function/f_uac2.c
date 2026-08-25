@@ -30,6 +30,8 @@
 #define CONTROL_RDWR	3
 
 #define CLK_FREQ_CTRL	0
+/* UAC2 4.7.2.1: bits 2-3 of a Clock Source's bmControls. */
+#define CLK_VALID_CTRL	2
 #define CLK_VLD_CTRL	2
 
 #define COPY_CTRL	0
@@ -136,7 +138,16 @@ static struct uac_clock_source_descriptor in_clk_src_desc = {
 	.bDescriptorSubtype = UAC2_CLOCK_SOURCE,
 	/* .bClockID = DYNAMIC */
 	.bmAttributes = UAC_CLOCK_SOURCE_TYPE_INT_FIXED,
-	.bmControls = (CONTROL_RDONLY << CLK_FREQ_CTRL),
+	/*
+	 * Declare clock validity as well as frequency. in_rq_cur() has always
+	 * answered UAC2_CS_CONTROL_CLOCK_VALID, but a host is only entitled to
+	 * ask about controls the descriptor declares, and Windows' inbox
+	 * usbaudio2 declines to start a clock whose validity it cannot read -
+	 * CM_PROB_FAILED_START, with the function otherwise enumerated. The
+	 * answer already exists; this only advertises that it may be asked.
+	 */
+	.bmControls = (CONTROL_RDONLY << CLK_FREQ_CTRL) |
+		      (CONTROL_RDONLY << CLK_VALID_CTRL),
 	.bAssocTerminal = 0,
 };
 
@@ -148,7 +159,16 @@ static struct uac_clock_source_descriptor out_clk_src_desc = {
 	.bDescriptorSubtype = UAC2_CLOCK_SOURCE,
 	/* .bClockID = DYNAMIC */
 	.bmAttributes = UAC_CLOCK_SOURCE_TYPE_INT_FIXED,
-	.bmControls = (CONTROL_RDONLY << CLK_FREQ_CTRL),
+	/*
+	 * Declare clock validity as well as frequency. in_rq_cur() has always
+	 * answered UAC2_CS_CONTROL_CLOCK_VALID, but a host is only entitled to
+	 * ask about controls the descriptor declares, and Windows' inbox
+	 * usbaudio2 declines to start a clock whose validity it cannot read -
+	 * CM_PROB_FAILED_START, with the function otherwise enumerated. The
+	 * answer already exists; this only advertises that it may be asked.
+	 */
+	.bmControls = (CONTROL_RDONLY << CLK_FREQ_CTRL) |
+		      (CONTROL_RDONLY << CLK_VALID_CTRL),
 	.bAssocTerminal = 0,
 };
 
