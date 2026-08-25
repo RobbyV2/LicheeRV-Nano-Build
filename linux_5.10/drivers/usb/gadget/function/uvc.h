@@ -98,8 +98,15 @@ struct uvc_video {
 	 * all. Count what was queued against what actually went out, so a run
 	 * that is fixed can be told apart from a run that was lucky.
 	 */
+	/* Set when a payload of the frame being encoded did not reach the
+	 * host, cleared when the next frame starts.
+	 */
+	unsigned int frame_bad;
+	unsigned int frames_marked;
 	unsigned int req_queued;
 	unsigned int req_short;
+	unsigned int req_zero;
+	unsigned int req_err;
 	unsigned int bytes_queued;
 	unsigned int bytes_sent;
 

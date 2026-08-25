@@ -33,6 +33,17 @@ uvc_video_encode_header(struct uvc_video *video, struct uvc_buffer *buf,
 	data[0] = 2;
 	data[1] = UVC_STREAM_EOH | video->fid;
 
+	/*
+	 * A payload of this frame never made it onto the bus. Isochronous has
+	 * no retransmit, so the frame cannot be repaired - but it can be
+	 * labelled. UVC keeps an error bit in the payload header for exactly
+	 * this, and a host that sees it discards the frame instead of decoding
+	 * a JPEG with a hole punched through it. One frame missing at 30fps is
+	 * not visible; one frame torn in half is.
+	 */
+	if (video->frame_bad)
+		data[1] |= UVC_STREAM_ERR;
+
 	if (buf->bytesused - video->queue.buf_used <= len - 2)
 		data[1] |= UVC_STREAM_EOF;
 
@@ -122,6 +133,10 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 		buf->state = UVC_BUF_STATE_DONE;
 		uvcg_queue_next_buffer(&video->queue, buf);
 		video->fid ^= UVC_STREAM_FID;
+		if (video->frame_bad) {
+			video->frames_marked++;
+			video->frame_bad = 0;
+		}
 	}
 }
 #else
@@ -193,16 +208,13 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 	video->req_queued++;
 	video->bytes_queued += req->length;
 	video->bytes_sent += req->actual;
+	if (req->status)
+		video->req_err++;
 	if (req->status == 0 && req->actual < req->length) {
 		video->req_short++;
-		/* Rate limited because a bad second produces thirty of these
-		 * and the log is the only channel this board has.
-		 */
-		if (printk_ratelimit())
-			uvcg_info(&video->uvc->func,
-				  "VS short IN: %u of %u bytes, %u short of %u requests\n",
-				  req->actual, req->length,
-				  video->req_short, video->req_queued);
+		if (req->actual == 0)
+			video->req_zero++;
+		video->frame_bad = 1;
 	}
 
 	switch (req->status) {
@@ -400,8 +412,9 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 
 	if (!enable) {
 		uvcg_info(&video->uvc->func,
-			  "VS stream stats: %u requests, %u short, %u of %u bytes sent\n",
-			  video->req_queued, video->req_short,
+			  "VS stream stats: %u requests, %u short (%u zero), %u errored, %u frames marked bad, %u of %u bytes sent\n",
+			  video->req_queued, video->req_short, video->req_zero,
+			  video->req_err, video->frames_marked,
 			  video->bytes_sent, video->bytes_queued);
 		cancel_work_sync(&video->pump);
 		uvcg_queue_cancel(&video->queue, 0);
@@ -417,6 +430,10 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 
 	video->req_queued = 0;
 	video->req_short = 0;
+	video->req_zero = 0;
+	video->req_err = 0;
+	video->frame_bad = 0;
+	video->frames_marked = 0;
 	video->bytes_queued = 0;
 	video->bytes_sent = 0;
 

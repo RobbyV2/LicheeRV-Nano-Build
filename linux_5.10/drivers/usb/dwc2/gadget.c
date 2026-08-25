@@ -101,6 +101,14 @@ static inline bool using_dma(struct dwc2_hsotg *hsotg)
  *
  * Return true if we're using descriptor DMA.
  */
+/* Microframes of lead given to the first descriptor of an isochronous IN burst
+ * after the endpoint has been idle. Writable at runtime so the value can be
+ * swept against the hardware instead of guessed.
+ */
+static int dwc2_isoc_lead = 1;
+module_param_named(isoc_lead, dwc2_isoc_lead, int, 0644);
+MODULE_PARM_DESC(isoc_lead, "microframes of lead for a resynced isoc IN burst");
+
 static inline bool using_desc_dma(struct dwc2_hsotg *hsotg)
 {
 	return hsotg->params.g_dma_desc;
@@ -920,6 +928,7 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
 	/* Check if descriptor chain full */
 	if ((desc->status >> DEV_DMA_BUFF_STS_SHIFT) ==
 	    DEV_DMA_BUFF_STS_HREADY) {
+		hs_ep->isoc_qfull++;
 		dev_dbg(hsotg->dev, "%s: desc chain full\n", __func__);
 		return 1;
 	}
@@ -959,6 +968,8 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
 	if (hs_ep->dir_in)
 		dwc2_gadget_incr_frame_num(hs_ep);
 
+	hs_ep->isoc_built++;
+
 	/* Update index of last configured entry in the chain */
 	hs_ep->next_desc++;
 	if (hs_ep->next_desc >= MAX_DMA_DESC_NUM_HS_ISOC)
@@ -987,10 +998,12 @@ static void dwc2_gadget_start_isoc_ddma(struct dwc2_hsotg_ep *hs_ep)
 	struct dwc2_dma_desc *desc;
 
 	if (list_empty(&hs_ep->queue)) {
+		hs_ep->isoc_start_empty++;
 		hs_ep->target_frame = TARGET_FRAME_INITIAL;
 		dev_dbg(hsotg->dev, "%s: No requests in queue\n", __func__);
 		return;
 	}
+	hs_ep->isoc_starts++;
 
 	/* Initialize descriptor chain by Host Busy status */
 	for (i = 0; i < MAX_DMA_DESC_NUM_HS_ISOC; i++) {
@@ -1463,6 +1476,14 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 	 * OutTknEpDis interrupts.
 	 */
 	if (using_desc_dma(hs) && hs_ep->isochronous) {
+		if (hs_ep->dir_in) {
+			hs_ep->isoc_enq++;
+			if (hs_ep->target_frame == TARGET_FRAME_INITIAL)
+				hs_ep->isoc_enq_idle++;
+			else if (!(dwc2_readl(hs, DIEPCTL(hs_ep->index)) &
+				   DXEPCTL_EPENA))
+				hs_ep->isoc_enq_dead++;
+		}
 		if (hs_ep->target_frame != TARGET_FRAME_INITIAL) {
 			dma_addr_t dma_addr = hs_req->req.dma;
 
@@ -1491,9 +1512,24 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 				hs->frame_number =
 					dwc2_hsotg_read_frameno(hs);
 				if (dwc2_gadget_target_frame_elapsed(hs_ep)) {
+					int lead = dwc2_isoc_lead;
+
 					hs_ep->target_frame =
 						hs->frame_number;
-					dwc2_gadget_incr_frame_num(hs_ep);
+					/* How far ahead of the bus the first
+					 * descriptor of a burst is aimed. One
+					 * microframe is the least that can
+					 * work; more buys slack against the
+					 * time between stamping a descriptor
+					 * and the core reading it. Tunable so
+					 * the right value can be measured
+					 * rather than guessed.
+					 */
+					if (lead < 1)
+						lead = 1;
+					while (lead--)
+						dwc2_gadget_incr_frame_num(hs_ep);
+					hs_ep->isoc_resync++;
 				}
 			}
 
@@ -2219,12 +2255,45 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 		ureq = &hs_req->req;
 
 		/* Check completion status */
+		hs_ep->isoc_sts[(desc_sts & DEV_DMA_STS_MASK) >>
+				DEV_DMA_STS_SHIFT]++;
+
 		if ((desc_sts & DEV_DMA_STS_MASK) >> DEV_DMA_STS_SHIFT ==
 			DEV_DMA_STS_SUCC) {
 			mask = hs_ep->dir_in ? DEV_DMA_ISOC_TX_NBYTES_MASK :
 				DEV_DMA_ISOC_RX_NBYTES_MASK;
 			ureq->actual = ureq->length - ((desc_sts & mask) >>
 				DEV_DMA_ISOC_NBYTES_SHIFT);
+
+			if (hs_ep->dir_in && ureq->actual < ureq->length) {
+				struct dwc2_isoc_ev *ev;
+
+				if (ureq->actual == 0)
+					hs_ep->isoc_zero++;
+				else
+					hs_ep->isoc_partial++;
+				/* An interrupt handler cannot afford to print
+				 * one line per lost payload, and a rate
+				 * limiter throws away exactly the records
+				 * that would show a pattern. Keep the raw
+				 * descriptor in a ring instead - its status,
+				 * the microframe it was aimed at, where it
+				 * sat in the chain and whether the endpoint
+				 * was still enabled - and read it out of
+				 * debugfs afterwards.
+				 */
+				ev = &hs_ep->isoc_log[hs_ep->isoc_log_head %
+						      DWC2_ISOC_LOG_N];
+				ev->sts = desc_sts;
+				ev->tframe = hs_ep->target_frame;
+				ev->now = dwc2_hsotg_read_frameno(hsotg);
+				ev->cdesc = hs_ep->compl_desc;
+				ev->ndesc = hs_ep->next_desc;
+				ev->len = ureq->length;
+				ev->epctl = dwc2_readl(hsotg,
+						       DIEPCTL(hs_ep->index));
+				hs_ep->isoc_log_head++;
+			}
 
 			/*
 			 * No misalignment adjustment. Upstream adds the
@@ -2268,6 +2337,7 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 				DEV_DMA_STS_SHIFT);
 		}
 
+		hs_ep->isoc_cpl_in++;
 		dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, 0);
 
 		hs_ep->compl_desc++;
@@ -2291,9 +2361,35 @@ static void dwc2_gadget_handle_isoc_bna(struct dwc2_hsotg_ep *hs_ep)
 	struct dwc2_hsotg *hsotg = hs_ep->parent;
 	int i;
 
+	hs_ep->isoc_bna++;
 	if (!hs_ep->dir_in)
 		dwc2_flush_rx_fifo(hsotg);
-	dwc2_hsotg_complete_request(hsotg, hs_ep, get_ep_head(hs_ep), 0);
+
+	/*
+	 * BNA says the core reached a descriptor software had not made
+	 * ready. Nothing was consumed by it. Upstream hands the head request
+	 * back to the function here all the same, with status 0, and a
+	 * request given back unsent is indistinguishable from one that went
+	 * out - so a whole USB payload leaves the gadget's books as sent
+	 * while the host never sees it.
+	 *
+	 * That is not a rare error path on a UVC gadget. The endpoint drains
+	 * between payloads, so the core runs off the end of the chain about
+	 * twice per video frame, and every time the pump has already queued
+	 * the next payload when it does, that payload is thrown away: the
+	 * frame reaches the host exactly one packet short and the JPEG is
+	 * torn. Leave the queue alone instead. The chain is retired and
+	 * target_frame reset just below, so the next IN token restarts the
+	 * burst with every queued request still in it.
+	 *
+	 * OUT is left on the old path deliberately - it has its own
+	 * measured behaviour and nothing here is about it.
+	 */
+	if (!hs_ep->dir_in)
+		dwc2_hsotg_complete_request(hsotg, hs_ep,
+					    get_ep_head(hs_ep), 0);
+	else if (!list_empty(&hs_ep->queue))
+		hs_ep->isoc_bna_kept++;
 
 	/*
 	 * Retire the chain along with the indices into it. Resetting the
@@ -2921,6 +3017,7 @@ static void dwc2_gadget_handle_ep_disabled(struct dwc2_hsotg_ep *hs_ep)
 		dwc2_hsotg_txfifo_flush(hsotg, hs_ep->fifo_index);
 
 		if (hs_ep->isochronous) {
+			hs_ep->isoc_epdis++;
 			dwc2_hsotg_complete_in(hsotg, hs_ep);
 			return;
 		}
@@ -3037,8 +3134,33 @@ static void dwc2_gadget_handle_nak(struct dwc2_hsotg_ep *hs_ep)
 	if (hs_ep->target_frame == TARGET_FRAME_INITIAL) {
 
 		if (using_desc_dma(hsotg)) {
+			int lead = dwc2_isoc_lead;
+
+			/*
+			 * This is where a UVC burst is really stamped. The
+			 * endpoint's queue drains between video frames, which
+			 * returns target_frame to TARGET_FRAME_INITIAL, so
+			 * every frame arrives here and every descriptor in
+			 * the burst is numbered from this one base.
+			 *
+			 * hsotg->frame_number is a cache with nothing keeping
+			 * it current - there is no SOF handler, and the only
+			 * writers are two unrelated paths - so by the time a
+			 * gadget that goes idle for 264 microframes between
+			 * frames gets here it can hold a number from long
+			 * ago. Stamping a whole burst from a stale base aims
+			 * descriptors at microframes that are not the ones
+			 * the host will ask on, and the core returns them
+			 * having sent nothing, with status 0. Read the frame
+			 * the bus is actually on.
+			 */
+			hsotg->frame_number = dwc2_hsotg_read_frameno(hsotg);
 			hs_ep->target_frame = hsotg->frame_number;
-			dwc2_gadget_incr_frame_num(hs_ep);
+			if (lead < 1)
+				lead = 1;
+			while (lead--)
+				dwc2_gadget_incr_frame_num(hs_ep);
+			hs_ep->isoc_resync++;
 
 			/* In service interval mode target_frame must
 			 * be set to last (u)frame of the service interval.
@@ -3682,6 +3804,14 @@ static void dwc2_gadget_handle_incomplete_isoc_in(struct dwc2_hsotg *hsotg)
 
 	daintmsk = dwc2_readl(hsotg, DAINTMSK);
 
+	/*
+	 * The test below asks whether the endpoint's target microframe has
+	 * gone by, and answers it out of hsotg->frame_number - a cache no
+	 * SOF handler refreshes. Read the bus before deciding to tear an
+	 * endpoint down mid-burst.
+	 */
+	hsotg->frame_number = dwc2_hsotg_read_frameno(hsotg);
+
 	for (idx = 1; idx < hsotg->num_of_eps; idx++) {
 		hs_ep = hsotg->eps_in[idx];
 		/* Proceed only unmasked ISOC EPs */
@@ -3691,6 +3821,7 @@ static void dwc2_gadget_handle_incomplete_isoc_in(struct dwc2_hsotg *hsotg)
 		epctrl = dwc2_readl(hsotg, DIEPCTL(idx));
 		if ((epctrl & DXEPCTL_EPENA) &&
 		    dwc2_gadget_target_frame_elapsed(hs_ep)) {
+			hs_ep->isoc_incompl++;
 			epctrl |= DXEPCTL_SNAK;
 			epctrl |= DXEPCTL_EPDIS;
 			dwc2_writel(hsotg, epctrl, DIEPCTL(idx));

@@ -177,6 +177,42 @@ struct dwc2_hsotg_ep {
 	 * is otherwise invisible to everything above the driver.
 	 */
 	unsigned int            isoc_flushed;
+	/* Per descriptor-status tallies, plus how many IN descriptors came
+	 * back having sent nothing at all versus only part of their payload,
+	 * and how often a burst had to be caught up to the bus.
+	 */
+	unsigned int            isoc_sts[4];
+	unsigned int            isoc_zero;
+	unsigned int            isoc_partial;
+	unsigned int            isoc_resync;
+	/* Where requests and descriptors actually go. A request can leave
+	 * this driver by several routes and only one of them looks at the
+	 * descriptor, so counting the descriptor statuses alone cannot
+	 * account for every byte the function above says went missing.
+	 */
+	unsigned int            isoc_enq;
+	unsigned int            isoc_enq_idle;
+	unsigned int            isoc_enq_dead;
+	unsigned int            isoc_starts;
+	unsigned int            isoc_start_empty;
+	unsigned int            isoc_built;
+	unsigned int            isoc_qfull;
+	unsigned int            isoc_epdis;
+	unsigned int            isoc_incompl;
+	unsigned int            isoc_bna;
+	unsigned int            isoc_bna_kept;
+	unsigned int            isoc_cpl_in;
+#define DWC2_ISOC_LOG_N		48
+	struct dwc2_isoc_ev {
+		u32		sts;
+		u32		tframe;
+		u16		now;
+		u16		cdesc;
+		u16		ndesc;
+		u16		len;
+		u32		epctl;
+	}			isoc_log[DWC2_ISOC_LOG_N];
+	unsigned int            isoc_log_head;
 #define TARGET_FRAME_INITIAL   0xFFFFFFFF
 	bool			frame_overrun;
 

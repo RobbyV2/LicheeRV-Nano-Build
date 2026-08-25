@@ -256,6 +256,38 @@ static int ep_show(struct seq_file *seq, void *v)
 	seq_printf(seq, "mps %d\n", ep->ep.maxpacket);
 	seq_printf(seq, "total_data=%ld\n", ep->total_data);
 	seq_printf(seq, "isoc_flushed=%u\n", ep->isoc_flushed);
+	seq_printf(seq, "isoc_sts=%u,%u,%u,%u zero=%u partial=%u resync=%u\n",
+		   ep->isoc_sts[0], ep->isoc_sts[1], ep->isoc_sts[2],
+		   ep->isoc_sts[3], ep->isoc_zero, ep->isoc_partial,
+		   ep->isoc_resync);
+	seq_printf(seq,
+		   "isoc_enq=%u idle=%u dead=%u starts=%u empty=%u built=%u qfull=%u\n",
+		   ep->isoc_enq, ep->isoc_enq_idle, ep->isoc_enq_dead,
+		   ep->isoc_starts, ep->isoc_start_empty, ep->isoc_built,
+		   ep->isoc_qfull);
+	seq_printf(seq, "isoc_epdis=%u incompl=%u bna=%u bna_kept=%u cpl=%u\n",
+		   ep->isoc_epdis, ep->isoc_incompl, ep->isoc_bna,
+		   ep->isoc_bna_kept, ep->isoc_cpl_in);
+	if (ep->isoc_log_head) {
+		unsigned int n = min_t(unsigned int, ep->isoc_log_head,
+				       (unsigned int)DWC2_ISOC_LOG_N);
+		unsigned int i;
+
+		seq_printf(seq, "isoc_log (%u events, last %u):\n",
+			   ep->isoc_log_head, n);
+		for (i = ep->isoc_log_head - n; i < ep->isoc_log_head; i++) {
+			struct dwc2_isoc_ev *ev =
+				&ep->isoc_log[i % DWC2_ISOC_LOG_N];
+
+			seq_printf(seq,
+				   "  sts=%08x frnum=%u tf=%u now=%u cd=%u nd=%u len=%u epctl=%08x\n",
+				   ev->sts,
+				   (ev->sts & DEV_DMA_ISOC_FRNUM_MASK) >>
+				   DEV_DMA_ISOC_FRNUM_SHIFT,
+				   ev->tframe, ev->now, ev->cdesc, ev->ndesc,
+				   ev->len, ev->epctl);
+		}
+	}
 
 	seq_printf(seq, "request list (%p,%p):\n",
 		   ep->queue.next, ep->queue.prev);
