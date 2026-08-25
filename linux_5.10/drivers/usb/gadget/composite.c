@@ -1706,16 +1706,6 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 			fallthrough;
 		case USB_DT_CONFIG:
 			value = config_desc(cdev, w_value);
-			/*
-			 * The assembled configuration is what the host actually
-			 * parses, IADs and renumbered interfaces included, so dump
-			 * it rather than auditing each function's static tables.
-			 * Only the full-length read is worth printing; hosts fetch
-			 * the 9-byte header first to learn wTotalLength.
-			 */
-			if (value > 9)
-				print_hex_dump(KERN_INFO, "usbcfg: ", DUMP_PREFIX_OFFSET,
-					       16, 1, req->buf, value, false);
 			if (value >= 0)
 				value = min(w_length, (u16) value);
 			break;

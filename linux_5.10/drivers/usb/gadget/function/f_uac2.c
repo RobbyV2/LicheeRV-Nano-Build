@@ -992,22 +992,6 @@ in_rq_range(struct usb_function *fn, const struct usb_ctrlrequest *cr)
 		value = min_t(unsigned, w_length, sizeof r);
 		memcpy(req->buf, &r, value);
 
-		/*
-		 * The bytes as they will go on the wire. Windows asks this exactly
-		 * once, gets our answer, and stops with STATUS_RANGE_NOT_FOUND - so
-		 * the reply itself is what it refuses, and reading the source has
-		 * already been wrong five times about why. UAC2 5.2.3.3 layout 3 is
-		 * wNumSubRanges(2) then dMIN/dMAX/dRES(4 each), all little-endian.
-		 */
-		{
-			u8 *b = req->buf;
-
-			dev_info(&agdev->gadget->dev,
-				 "uac2 range reply srate=%d len=%d bytes=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-				 (entity_id == USB_IN_CLK_ID) ? p_srate : c_srate, value,
-				 b[0], b[1], b[2], b[3], b[4], b[5], b[6],
-				 b[7], b[8], b[9], b[10], b[11], b[12], b[13]);
-		}
 	} else {
 		dev_err(&agdev->gadget->dev,
 			"%s:%d control_selector=%d TODO!\n",
@@ -1082,38 +1066,10 @@ afunc_setup(struct usb_function *fn, const struct usb_ctrlrequest *cr)
 		dev_err(&agdev->gadget->dev, "%s:%d Error!\n",
 				__func__, __LINE__);
 
-	/*
-	 * Every class request and what we answered, so the conversation with the
-	 * host can be read rather than inferred. Five descriptor-shaped theories
-	 * about why Windows will not start this function have each moved the
-	 * failure code and none has fixed it; this turns that guessing into
-	 * observation. entity is the addressed unit, cs the control selector.
-	 */
-	dev_info(&agdev->gadget->dev,
-		 "uac2 setup: bmRequestType=%02x bRequest=%02x cs=%u entity=%u intf=%u wLength=%u -> %d\n",
-		 cr->bRequestType, cr->bRequest,
-		 le16_to_cpu(cr->wValue) >> 8,
-		 (le16_to_cpu(cr->wIndex) >> 8) & 0xff,
-		 le16_to_cpu(cr->wIndex) & 0xff,
-		 w_length, value);
-
 	if (value >= 0) {
 		req->length = value;
 		req->zero = value < w_length;
-		/*
-		 * Whether the answer actually left the controller, not just what we
-		 * meant to answer. The reply bytes are already known good, so if
-		 * Windows still calls this range not found, the next place to look is
-		 * the transfer itself.
-		 */
-		{
-			int queued = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
-
-			dev_info(&agdev->gadget->dev,
-				 "uac2 ep0 queue: len=%d zero=%d wLength=%u -> %d\n",
-				 req->length, req->zero, w_length, queued);
-			value = queued;
-		}
+		value = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
 		if (value < 0) {
 			dev_err(&agdev->gadget->dev,
 				"%s:%d Error!\n", __func__, __LINE__);
