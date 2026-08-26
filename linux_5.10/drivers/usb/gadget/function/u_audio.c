@@ -12,6 +12,7 @@
  *    Jaswinder Singh (jaswinder.singh@linaro.org)
  */
 
+#include <linux/cache.h>
 #include <linux/module.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -82,8 +83,16 @@ struct uac_rtd_params {
 	ssize_t hw_ptr;
 
 	void *rbuf;
+	/* What was actually allocated. rbuf is that, advanced to a cache
+	 * line boundary.
+	 */
+	void *rbuf_alloc;
 
 	unsigned int max_psize;	/* MaxPacketSize of endpoint */
+	/* Distance from one request's buffer to the next. Never max_psize:
+	 * see uac_req_stride().
+	 */
+	unsigned int req_stride;
 	struct uac_req *ureq;
 
 	spinlock_t lock;
@@ -139,6 +148,52 @@ static const struct snd_pcm_hardware uac_pcm_hardware = {
 	.period_bytes_max = PRD_SIZE_MAX,
 	.periods_min = MIN_PERIODS,
 };
+
+/*
+ * Give every request buffer a cache line of its own.
+ *
+ * These buffers are handed to the UDC and mapped for DMA, and this SoC's USB
+ * controller does not see the CPU's caches. The arch's DMA_FROM_DEVICE sync is
+ * a writeback-invalidate across the buffer's address range rounded out to
+ * whole cache lines, so a line that holds the end of one request's buffer and
+ * the start of the next belongs to both of them. Dirty that line by writing
+ * one buffer, and the writeback lands on top of the bytes the controller has
+ * just delivered into its neighbour: the neighbour's head and tail revert to
+ * what that memory held a lap of the request ring ago.
+ *
+ * A 98 byte packet - the size of an asynchronous 48 kHz mono sink, one sample
+ * of headroom over the nominal 96 - packed end to end puts two buffers in one
+ * 64 byte line nearly every time. It also leaves every second buffer at an
+ * address 2 mod 4, and dwc2 bounces any request buffer that is not four byte
+ * aligned through a kmalloc of its own, memcpy'ing the result back. That memcpy
+ * is the dirtying write, and it happened once a millisecond on exactly every
+ * other buffer - which is why every other 1 ms block of the target host's audio
+ * arrived with its edges replaced by audio from 32 ms earlier, and why the
+ * speaker buzzed.
+ *
+ * Rounding the stride up to a cache line ends both halves of it: no two buffers
+ * share a line, and each one is aligned well past the four bytes that would
+ * make the UDC bounce it.
+ */
+static unsigned int uac_req_stride(unsigned int max_psize)
+{
+	return ALIGN(max_psize, L1_CACHE_BYTES);
+}
+
+static void *uac_alloc_rbuf(struct uac_rtd_params *prm, unsigned int req_number)
+{
+	prm->req_stride = uac_req_stride(prm->max_psize);
+	/* Aligning inside the allocation rather than trusting the allocator:
+	 * this architecture does not define ARCH_DMA_MINALIGN, so kmalloc
+	 * promises only eight bytes and a cache line is sixty four.
+	 */
+	prm->rbuf_alloc = kzalloc(req_number * prm->req_stride +
+				  L1_CACHE_BYTES - 1, GFP_KERNEL);
+	if (!prm->rbuf_alloc)
+		return NULL;
+	prm->rbuf = PTR_ALIGN(prm->rbuf_alloc, L1_CACHE_BYTES);
+	return prm->rbuf;
+}
 
 static void u_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
 {
@@ -288,7 +343,7 @@ static int uac_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	/* Clear buffer after Play stops */
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK && !prm->ss)
-		memset(prm->rbuf, 0, prm->max_psize * params->req_number);
+		memset(prm->rbuf, 0, prm->req_stride * params->req_number);
 
 	return err;
 }
@@ -449,7 +504,7 @@ int u_audio_start_capture(struct g_audio *audio_dev)
 			req->context = &prm->ureq[i];
 			req->length = req_len;
 			req->complete = u_audio_iso_complete;
-			req->buf = prm->rbuf + i * ep->maxpacket;
+			req->buf = prm->rbuf + i * prm->req_stride;
 		}
 
 		if (usb_ep_queue(ep, prm->ureq[i].req, GFP_ATOMIC))
@@ -530,7 +585,7 @@ int u_audio_start_playback(struct g_audio *audio_dev)
 			req->context = &prm->ureq[i];
 			req->length = req_len;
 			req->complete = u_audio_iso_complete;
-			req->buf = prm->rbuf + i * ep->maxpacket;
+			req->buf = prm->rbuf + i * prm->req_stride;
 		}
 
 		if (usb_ep_queue(ep, prm->ureq[i].req, GFP_ATOMIC))
@@ -592,9 +647,7 @@ static int __g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
 			goto fail;
 		}
 
-		prm->rbuf = kcalloc(params->req_number, prm->max_psize,
-				GFP_KERNEL);
-		if (!prm->rbuf) {
+		if (!uac_alloc_rbuf(prm, params->req_number)) {
 			prm->max_psize = 0;
 			err = -ENOMEM;
 			goto fail;
@@ -614,9 +667,7 @@ static int __g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
 			goto fail;
 		}
 
-		prm->rbuf = kcalloc(params->req_number, prm->max_psize,
-				GFP_KERNEL);
-		if (!prm->rbuf) {
+		if (!uac_alloc_rbuf(prm, params->req_number)) {
 			prm->max_psize = 0;
 			err = -ENOMEM;
 			goto fail;
@@ -670,8 +721,8 @@ snd_fail:
 fail:
 	kfree(uac->p_prm.ureq);
 	kfree(uac->c_prm.ureq);
-	kfree(uac->p_prm.rbuf);
-	kfree(uac->c_prm.rbuf);
+	kfree(uac->p_prm.rbuf_alloc);
+	kfree(uac->c_prm.rbuf_alloc);
 	kfree(uac->function_name);
 	kfree(uac);
 
@@ -709,8 +760,8 @@ void g_audio_cleanup(struct g_audio *g_audio)
 
 	kfree(uac->p_prm.ureq);
 	kfree(uac->c_prm.ureq);
-	kfree(uac->p_prm.rbuf);
-	kfree(uac->c_prm.rbuf);
+	kfree(uac->p_prm.rbuf_alloc);
+	kfree(uac->c_prm.rbuf_alloc);
 	kfree(uac->function_name);
 	kfree(uac);
 }
