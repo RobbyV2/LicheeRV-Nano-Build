@@ -101,14 +101,6 @@ static inline bool using_dma(struct dwc2_hsotg *hsotg)
  *
  * Return true if we're using descriptor DMA.
  */
-/* Microframes of lead given to the first descriptor of an isochronous IN burst
- * after the endpoint has been idle. Writable at runtime so the value can be
- * swept against the hardware instead of guessed.
- */
-static int dwc2_isoc_lead = 1;
-module_param_named(isoc_lead, dwc2_isoc_lead, int, 0644);
-MODULE_PARM_DESC(isoc_lead, "microframes of lead for a resynced isoc IN burst");
-
 static inline bool using_desc_dma(struct dwc2_hsotg *hsotg)
 {
 	return hsotg->params.g_dma_desc;
@@ -1512,23 +1504,28 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 				hs->frame_number =
 					dwc2_hsotg_read_frameno(hs);
 				if (dwc2_gadget_target_frame_elapsed(hs_ep)) {
-					int lead = dwc2_isoc_lead;
-
 					hs_ep->target_frame =
 						hs->frame_number;
-					/* How far ahead of the bus the first
-					 * descriptor of a burst is aimed. One
-					 * microframe is the least that can
-					 * work; more buys slack against the
-					 * time between stamping a descriptor
-					 * and the core reading it. Tunable so
-					 * the right value can be measured
-					 * rather than guessed.
+					/* Exactly one microframe of lead. The
+					 * lead was made a runtime knob and
+					 * swept against the hardware: 1 is
+					 * not merely the smallest value that
+					 * works, it is the only one. At 2 and
+					 * at 4 the gadget's own books look
+					 * better still - the short
+					 * completions fall to three and then
+					 * to none - while the host stops
+					 * seeing the end of any frame at all:
+					 * 1200 start-of-image markers against
+					 * 24 end-of-image markers at 2, and 6
+					 * at 4, where a lead of 1 gives 1200
+					 * against 1200. Aiming a burst
+					 * further ahead loses each frame's
+					 * last, short payload, which is the
+					 * one carrying EOI and the end-of-
+					 * frame flag.
 					 */
-					if (lead < 1)
-						lead = 1;
-					while (lead--)
-						dwc2_gadget_incr_frame_num(hs_ep);
+					dwc2_gadget_incr_frame_num(hs_ep);
 					hs_ep->isoc_resync++;
 				}
 			}
@@ -3134,8 +3131,6 @@ static void dwc2_gadget_handle_nak(struct dwc2_hsotg_ep *hs_ep)
 	if (hs_ep->target_frame == TARGET_FRAME_INITIAL) {
 
 		if (using_desc_dma(hsotg)) {
-			int lead = dwc2_isoc_lead;
-
 			/*
 			 * This is where a UVC burst is really stamped. The
 			 * endpoint's queue drains between video frames, which
@@ -3156,10 +3151,7 @@ static void dwc2_gadget_handle_nak(struct dwc2_hsotg_ep *hs_ep)
 			 */
 			hsotg->frame_number = dwc2_hsotg_read_frameno(hsotg);
 			hs_ep->target_frame = hsotg->frame_number;
-			if (lead < 1)
-				lead = 1;
-			while (lead--)
-				dwc2_gadget_incr_frame_num(hs_ep);
+			dwc2_gadget_incr_frame_num(hs_ep);
 			hs_ep->isoc_resync++;
 
 			/* In service interval mode target_frame must
