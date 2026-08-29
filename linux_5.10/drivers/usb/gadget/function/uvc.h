@@ -136,6 +136,11 @@ struct uvc_video;
 struct uvcg_request {
 	struct uvc_video *video;
 	unsigned int frame;
+	/* This request carries no payload at all - it is only there to keep the
+	 * endpoint's descriptor chain from running out. It belongs to no frame,
+	 * so its completion must not settle one.
+	 */
+	bool idle;
 };
 
 struct uvc_video {
@@ -179,6 +184,18 @@ struct uvc_video {
 	 * that "the host was told" can be told apart from "the host was not".
 	 */
 	unsigned int frames_late;
+	/* Zero-length payloads queued to keep the endpoint alive, and how many
+	 * of them are in flight right now. Counted apart from the real ones so
+	 * that the loss rate stays a rate of payloads that carried video.
+	 */
+	unsigned int req_idle;
+	unsigned int idle_inflight;
+	/* The stats line is the only window onto the loss rate, and it used to
+	 * be printed once, when the host stopped the stream. Nothing on this
+	 * board can make the host stop on demand, so print it on a timer as
+	 * well and read the rate out of a running session.
+	 */
+	unsigned long stats_next;
 	unsigned int req_queued;
 	unsigned int req_short;
 	unsigned int req_zero;
