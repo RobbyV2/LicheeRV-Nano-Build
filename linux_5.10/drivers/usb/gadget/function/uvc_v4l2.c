@@ -186,7 +186,12 @@ uvc_v4l2_qbuf(struct file *file, void *fh, struct v4l2_buffer *b)
 	if (ret < 0)
 		return ret;
 
-	queue_work(video->async_wq, &video->pump);
+	/* The v4l2 node outlives the function, so a buffer can still be queued
+	 * after uvcg_video_exit() has torn the stream's workqueue down. There
+	 * is nothing left to pump at that point.
+	 */
+	if (video->async_wq)
+		queue_work(video->async_wq, &video->pump);
 
 	return ret;
 }
