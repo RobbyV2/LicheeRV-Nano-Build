@@ -178,6 +178,11 @@ struct uvc_video {
 	 */
 	unsigned int frame_bad;
 	unsigned int frames_marked;
+	/* Frames ended early because a payload of theirs was lost: the rest of
+	 * the frame was never sent and no EOF went with it, so the host has a
+	 * fragment to discard rather than a whole-looking JPEG with a hole.
+	 */
+	unsigned int frames_dropped;
 	/* Frames whose loss was reported after every payload of theirs had
 	 * already been encoded, so none was left to carry the error bit. With
 	 * the EOF payload held back this should stay at zero; it is here so

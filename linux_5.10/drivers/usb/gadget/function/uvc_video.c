@@ -62,6 +62,28 @@ module_param_named(eof_hold, uvcg_eof_hold, bool, 0644);
 MODULE_PARM_DESC(eof_hold,
 		 "hold a frame's last payload until its earlier ones retire");
 
+/*
+ * Whether a frame that has already lost a payload is abandoned instead of
+ * finished.
+ *
+ * Isochronous cannot retransmit, so a frame with a hole in its entropy-coded
+ * scan cannot be repaired - only labelled, and this host ignores the label. It
+ * decodes the frame anyway, and a JPEG whose Huffman stream has a hole punched
+ * through it is what the user sees as the picture shifting, taking on a colour
+ * cast and going grey: one lost payload desynchronises the MCU position, the
+ * chroma DC predictors and the chroma scan all at once.
+ *
+ * A frame that never arrives is invisible at 30fps; a frame that arrives torn
+ * is not. So stop sending the rest of it and send no EOF, which leaves the host
+ * an unterminated fragment and the previous good frame still on screen. The FID
+ * toggles as it would at any frame boundary, so the stream stays in step and
+ * the next frame starts cleanly.
+ */
+static bool uvcg_drop_bad = true;
+module_param_named(drop_bad, uvcg_drop_bad, bool, 0644);
+MODULE_PARM_DESC(drop_bad,
+		 "abandon a frame that has already lost a payload");
+
 /* --------------------------------------------------------------------------
  * Video codecs
  */
@@ -202,7 +224,24 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 	void *mem = req->buf;
 	int len = video->req_size;
 	int ret;
-	bool last, wait;
+	bool last, wait, bad;
+
+	spin_lock(&video->req_lock);
+	bad = video->frame_bad;
+	spin_unlock(&video->req_lock);
+
+	/*
+	 * This frame has a hole in it and nothing can put the payload back.
+	 * End it here rather than spend the rest of the bus on a picture that
+	 * will decode into garbage: uvc_video_frame_done() hands the buffer
+	 * back, toggles the frame ID and starts a new serial, so the host sees
+	 * a fragment that never got its EOF followed by a clean new frame.
+	 */
+	if (uvcg_drop_bad && bad) {
+		video->frames_dropped++;
+		uvc_video_frame_done(video, buf);
+		return -ENODATA;
+	}
 
 	/* Whether this payload is the one that will carry EOF. */
 	last = buf->bytesused - video->queue.buf_used <= (unsigned int)(len - 2);
@@ -313,10 +352,11 @@ static int uvcg_video_ep_queue(struct uvc_video *video, struct usb_request *req)
 static void uvc_video_report_stats(struct uvc_video *video)
 {
 	uvcg_info(&video->uvc->func,
-		  "VS stream stats: %u requests, %u short (%u zero), %u errored, %u frames marked bad, %u marked too late, %u idle, %u of %u bytes sent\n",
+		  "VS stream stats: %u requests, %u short (%u zero), %u errored, %u frames marked bad, %u dropped, %u marked too late, %u idle, %u of %u bytes sent\n",
 		  video->req_queued, video->req_short, video->req_zero,
-		  video->req_err, video->frames_marked, video->frames_late,
-		  video->req_idle, video->bytes_sent, video->bytes_queued);
+		  video->req_err, video->frames_marked, video->frames_dropped,
+		  video->frames_late, video->req_idle, video->bytes_sent,
+		  video->bytes_queued);
 }
 
 static void
@@ -582,17 +622,27 @@ static void uvcg_video_pump(struct work_struct *work)
 			break;
 		}
 
-		/* The frame's last payload waits for the frame's earlier ones
-		 * to retire, so that a payload lost on the wire is known
-		 * before the header that could have said so is encoded. The
-		 * request goes back unqueued and every completion re-runs the
-		 * pump, so the wait ends on the retirement it is waiting for.
-		 */
-		if (video->encode(req, video, buf) == -EAGAIN) {
-			spin_unlock_irqrestore(&queue->irqlock, flags);
-			/* Waiting on a retirement, which is still a stretch of
-			 * intervals with nothing offered to the endpoint.
+		ret = video->encode(req, video, buf);
+		if (ret == -ENODATA) {
+			/* The buffer was abandoned, not encoded. Put the
+			 * request back and take the next frame.
 			 */
+			spin_unlock_irqrestore(&queue->irqlock, flags);
+			spin_lock_irqsave(&video->req_lock, flags);
+			list_add_tail(&req->list, &video->req_free);
+			spin_unlock_irqrestore(&video->req_lock, flags);
+			continue;
+		}
+		if (ret == -EAGAIN) {
+			/* The frame's last payload is waiting for the frame's
+			 * earlier ones to retire, so that a payload lost on the
+			 * wire is known before the last chance to act on it is
+			 * spent. The request goes back unqueued and every
+			 * completion re-runs the pump, so the wait ends on the
+			 * retirement it is waiting for - which is also a stretch
+			 * of intervals with nothing offered to the endpoint.
+			 */
+			spin_unlock_irqrestore(&queue->irqlock, flags);
 			if (uvc_video_queue_idle(video, req))
 				continue;
 			break;
@@ -668,6 +718,7 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 	video->frame_inflight = 0;
 	video->frame_bad = 0;
 	video->frames_marked = 0;
+	video->frames_dropped = 0;
 	video->frames_late = 0;
 	video->bytes_queued = 0;
 	video->bytes_sent = 0;
