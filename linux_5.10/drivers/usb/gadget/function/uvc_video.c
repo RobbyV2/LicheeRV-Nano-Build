@@ -44,6 +44,24 @@ module_param_named(idle_depth, uvcg_idle_depth, uint, 0644);
 MODULE_PARM_DESC(idle_depth,
 		 "empty payloads kept queued on the isoc IN endpoint while idle");
 
+/*
+ * Whether the payload carrying EOF waits for the frame's earlier payloads to
+ * retire, so that the header can still say the frame is damaged.
+ *
+ * The wait was worth having while it was believed the host acted on
+ * UVC_STREAM_ERR. It does not: the Windows host decodes and displays a frame
+ * marked bad exactly as it displays a good one. What the wait still costs is
+ * real - the chain drains completely while the last payload is held back, so
+ * dwc2 returns target_frame to TARGET_FRAME_INITIAL and the endpoint has to be
+ * restarted a second time for that one payload, and a restart is where this
+ * controller loses payloads. Off by default; the knob is here so the two can be
+ * compared on the same hardware in the same session.
+ */
+static bool uvcg_eof_hold;
+module_param_named(eof_hold, uvcg_eof_hold, bool, 0644);
+MODULE_PARM_DESC(eof_hold,
+		 "hold a frame's last payload until its earlier ones retire");
+
 /* --------------------------------------------------------------------------
  * Video codecs
  */
@@ -190,7 +208,7 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 	last = buf->bytesused - video->queue.buf_used <= (unsigned int)(len - 2);
 
 	spin_lock(&video->req_lock);
-	wait = last && video->frame_inflight;
+	wait = uvcg_eof_hold && last && video->frame_inflight;
 	spin_unlock(&video->req_lock);
 
 	/*
