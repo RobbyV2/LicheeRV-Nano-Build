@@ -262,7 +262,7 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 	void *mem = req->buf;
 	int len = video->req_size;
 	int ret;
-	bool last, wait, bad;
+	bool last, wait, bad, drop;
 
 	/* Whether this payload is the one that will carry EOF. */
 	last = buf->bytesused - video->queue.buf_used <= (unsigned int)(len - 2);
@@ -345,12 +345,12 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 	 * from the top of its own buffer.
 	 */
 	spin_lock(&video->req_lock);
-	bad = video->frame_bad;
-	if (!bad)
+	drop = uvcg_drop_bad && video->frame_bad;
+	if (!drop)
 		video->frame_inflight++;
 	spin_unlock(&video->req_lock);
 
-	if (uvcg_drop_bad && bad) {
+	if (drop) {
 		video->frames_dropped++;
 		uvc_video_frame_done(video, buf);
 		return -ENODATA;
