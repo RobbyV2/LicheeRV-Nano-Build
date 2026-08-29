@@ -72,6 +72,34 @@ MODULE_PARM_DESC(eof_hold,
 		 "hold a frame's last payload until its earlier ones retire");
 
 /*
+ * How many of a frame's payloads may still be outstanding when its EOF payload
+ * is released.
+ *
+ * Zero is the strict reading of the hold - wait for every earlier payload to
+ * report - and zero is also, by definition, an empty descriptor chain. That is
+ * the restart the comment above warns about: dwc2 returns target_frame to
+ * TARGET_FRAME_INITIAL and the endpoint is started again for that one payload,
+ * and a restart is where this controller loses payloads. The cost shows up in
+ * the stats. Over one session with the hold on, ten of nineteen losses landed
+ * on a frame that was already fully queued, which is the signature of the EOF
+ * payload itself going missing; over one with the hold off, one of sixteen. The
+ * EOF payload is one payload in fifteen and half the late losses.
+ *
+ * One leaves a descriptor live, so the EOF payload is appended to a chain that
+ * is still running rather than starting a new one. The report given up is that
+ * of the most recently queued payload, which is no more exposed than any other
+ * payload in the middle of a frame; the report bought back is the EOF payload's
+ * own arrival, which is the one the hold was spending a restart to obtain.
+ *
+ * Zero restores the previous behaviour exactly, for sweeping the trade against
+ * the hardware.
+ */
+static unsigned int uvcg_eof_slack = 1;
+module_param_named(eof_slack, uvcg_eof_slack, uint, 0644);
+MODULE_PARM_DESC(eof_slack,
+		 "payloads that may still be in flight when EOF is released");
+
+/*
  * Whether a frame that has already lost a payload is abandoned instead of
  * finished.
  *
@@ -193,6 +221,7 @@ uvc_video_encode_bulk(struct usb_request *req, struct uvc_video *video,
 	int ret;
 
 	ctx->frame = video->frame_seq;
+	ctx->eof = false;
 
 	/* Add a header at the beginning of the payload. */
 	if (video->payload_size == 0) {
@@ -342,6 +371,7 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 	struct scatterlist *sg;
 
 	ctx->frame = video->frame_seq;
+	ctx->eof = false;
 	req->length = 0;
 
 	for_each_sg(req->sg, sg, UVCG_MAX_SG_NUM, i) {
@@ -398,11 +428,11 @@ static int uvcg_video_ep_queue(struct uvc_video *video, struct usb_request *req)
 static void uvc_video_report_stats(struct uvc_video *video)
 {
 	uvcg_info(&video->uvc->func,
-		  "VS stream stats: %u requests, %u short (%u zero), %u errored, %u frames marked bad, %u dropped, %u marked too late, %u idle, %u of %u bytes sent\n",
+		  "VS stream stats: %u requests, %u short (%u zero), %u errored, %u frames marked bad, %u dropped, %u marked too late (%u on EOF), %u idle, %u of %u bytes sent\n",
 		  video->req_queued, video->req_short, video->req_zero,
 		  video->req_err, video->frames_marked, video->frames_dropped,
-		  video->frames_late, video->req_idle, video->bytes_sent,
-		  video->bytes_queued);
+		  video->frames_late, video->frames_late_eof, video->req_idle,
+		  video->bytes_sent, video->bytes_queued);
 }
 
 static void
@@ -439,10 +469,13 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 			video->req_short++;
 			if (req->actual == 0)
 				video->req_zero++;
-			if (ctx->frame == video->frame_seq)
+			if (ctx->frame == video->frame_seq) {
 				video->frame_bad = 1;
-			else
+			} else {
 				video->frames_late++;
+				if (ctx->eof)
+					video->frames_late_eof++;
+			}
 		}
 	}
 	spin_unlock_irqrestore(&video->req_lock, flags);
@@ -529,6 +562,7 @@ uvc_video_alloc_requests(struct uvc_video *video)
 		video->req_ctx[i].video = video;
 		video->req_ctx[i].frame = video->frame_seq;
 		video->req_ctx[i].idle = false;
+		video->req_ctx[i].eof = false;
 		video->req[i]->context = &video->req_ctx[i];
 
 		list_add_tail(&video->req[i]->list, &video->req_free);
@@ -558,6 +592,7 @@ uvc_video_alloc_requests(struct uvc_video *video)
 		video->req_ctx[i].video = video;
 		video->req_ctx[i].frame = video->frame_seq;
 		video->req_ctx[i].idle = false;
+		video->req_ctx[i].eof = false;
 		video->req[i]->context = &video->req_ctx[i];
 		list_add_tail(&video->req[i]->list, &video->req_free);
 	}
@@ -766,6 +801,7 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 	video->frames_marked = 0;
 	video->frames_dropped = 0;
 	video->frames_late = 0;
+	video->frames_late_eof = 0;
 	video->bytes_queued = 0;
 	video->bytes_sent = 0;
 

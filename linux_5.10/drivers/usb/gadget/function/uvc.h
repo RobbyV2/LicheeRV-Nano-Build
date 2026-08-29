@@ -141,6 +141,15 @@ struct uvcg_request {
 	 * so its completion must not settle one.
 	 */
 	bool idle;
+	/* This request carries the frame's EOF. Its loss is the one loss that
+	 * can never be reported in time - the frame ends as it is encoded, so
+	 * the serial has already moved on by the time it completes - and with
+	 * the hold on it is also the most exposed payload of the frame, since
+	 * it is the one queued into a chain the hold has just drained. Worth
+	 * counting apart from every other late report, because the two ask for
+	 * different remedies.
+	 */
+	bool eof;
 };
 
 struct uvc_video {
@@ -189,6 +198,13 @@ struct uvc_video {
 	 * that "the host was told" can be told apart from "the host was not".
 	 */
 	unsigned int frames_late;
+	/* Of those, the ones where the payload lost was the EOF payload itself.
+	 * Nothing in the driver can ever catch that one in time, so it is the
+	 * floor on frames_late, and the only lever on it is not to lose the
+	 * payload - see eof_slack. Counting it apart is what says whether a
+	 * late report is a hole in the accounting or a hole in the wire.
+	 */
+	unsigned int frames_late_eof;
 	/* Zero-length payloads queued to keep the endpoint alive, and how many
 	 * of them are in flight right now. Counted apart from the real ones so
 	 * that the loss rate stays a rate of payloads that carried video.
