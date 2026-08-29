@@ -197,6 +197,12 @@ struct dwc2_hsotg_ep {
 	unsigned int            isoc_start_empty;
 	unsigned int            isoc_built;
 	unsigned int            isoc_qfull;
+	/* Descriptors that carried a payload and moved none of it. A flushed
+	 * descriptor is reported with status 0 and no bytes, so this is the
+	 * only place a lost payload is distinguishable from an empty one that
+	 * was only ever there to keep the chain fed.
+	 */
+	unsigned int            isoc_lost;
 	unsigned int            isoc_epdis;
 	unsigned int            isoc_incompl;
 	unsigned int            isoc_bna;

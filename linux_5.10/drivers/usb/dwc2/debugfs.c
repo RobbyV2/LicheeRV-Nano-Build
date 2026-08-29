@@ -255,7 +255,8 @@ static int ep_show(struct seq_file *seq, void *v)
 	seq_puts(seq, "\n");
 	seq_printf(seq, "mps %d\n", ep->ep.maxpacket);
 	seq_printf(seq, "total_data=%ld\n", ep->total_data);
-	seq_printf(seq, "isoc_flushed=%u\n", ep->isoc_flushed);
+	seq_printf(seq, "isoc_flushed=%u lost=%u\n", ep->isoc_flushed,
+		   ep->isoc_lost);
 	seq_printf(seq, "isoc_sts=%u,%u,%u,%u zero=%u partial=%u resync=%u\n",
 		   ep->isoc_sts[0], ep->isoc_sts[1], ep->isoc_sts[2],
 		   ep->isoc_sts[3], ep->isoc_zero, ep->isoc_partial,

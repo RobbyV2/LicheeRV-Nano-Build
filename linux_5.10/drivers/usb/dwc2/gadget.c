@@ -935,6 +935,17 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
 	desc->status = 0;
 	desc->status |= (DEV_DMA_BUFF_STS_HBUSY	<< DEV_DMA_BUFF_STS_SHIFT);
 
+	/*
+	 * A zero-length request is never DMA-mapped - usb_gadget_map_request()
+	 * returns early on one - so a request whose very first use is an empty
+	 * one arrives here with req.dma still zero. The core moves no bytes for
+	 * it and so never reads the address, but a descriptor is not the place
+	 * to leave a null pointer for a bus master to find. Point it at memory
+	 * that is certainly mapped and certainly ours.
+	 */
+	if (!len && !dma_buff)
+		dma_buff = hs_ep->desc_list_dma;
+
 	desc->buf = dma_buff;
 	desc->status |= (DEV_DMA_L | DEV_DMA_IOC |
 			 ((len << DEV_DMA_NBYTES_SHIFT) & mask));
@@ -2327,6 +2338,8 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 			 */
 			ureq->actual = 0;
 			hs_ep->isoc_flushed++;
+			if (hs_ep->dir_in && ureq->length)
+				hs_ep->isoc_lost++;
 			dev_dbg(hsotg->dev,
 				"%s: ep%d isoc desc not sent, sts %d\n",
 				__func__, hs_ep->index,
@@ -4323,8 +4336,27 @@ static int dwc2_hsotg_ep_enable(struct usb_ep *ep,
 			val = (val >> FIFOSIZE_DEPTH_SHIFT) * 4;
 			if (val < size)
 				continue;
-			/* Search for smallest acceptable fifo */
-			if (val < fifo_size) {
+			/*
+			 * Smallest acceptable fifo for everything that can
+			 * wait, largest for an isochronous IN endpoint, which
+			 * cannot. The fifo is how far ahead of the token the
+			 * core may fetch a payload; when the fetch does not
+			 * finish in time the core answers the token with a
+			 * zero-length packet and retires the descriptor as a
+			 * success, so an underrun looks exactly like a payload
+			 * that was never there. Two payloads of headroom is
+			 * what best-fit gave the UVC endpoint on this SoC -
+			 * 1536 bytes for a 768-byte packet - while a 3072-byte
+			 * fifo sat unclaimed beside it. The fifos are a fixed
+			 * hardware partition, so preferring the largest costs
+			 * nothing but the choice.
+			 */
+			if (hs_ep->isochronous && hs_ep->dir_in) {
+				if (fifo_size == UINT_MAX || val > fifo_size) {
+					fifo_size = val;
+					fifo_index = i;
+				}
+			} else if (val < fifo_size) {
 				fifo_size = val;
 				fifo_index = i;
 			}
