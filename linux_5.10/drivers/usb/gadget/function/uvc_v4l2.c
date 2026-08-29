@@ -29,11 +29,20 @@
  * Requests handling
  */
 
+/* The streaming node outlives the function here on purpose, so a handle held
+ * across an unbind can still reach this from userspace with func.config
+ * already NULL. Walking it then is not a NULL dereference the CPU catches
+ * cheaply, it is arithmetic on NULL that yields a plausible-looking address.
+ */
 static int
 uvc_send_response(struct uvc_device *uvc, struct uvc_request_data *data)
 {
-	struct usb_composite_dev *cdev = uvc->func.config->cdev;
+	struct usb_composite_dev *cdev;
 	struct usb_request *req = uvc->control_req;
+
+	if (!uvc->func.config || !uvc->func.config->cdev)
+		return -ENODEV;
+	cdev = uvc->func.config->cdev;
 
 	if (data->length < 0)
 		return usb_ep_set_halt(cdev->gadget->ep0);
@@ -68,7 +77,12 @@ uvc_v4l2_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
 {
 	struct video_device *vdev = video_devdata(file);
 	struct uvc_device *uvc = video_get_drvdata(vdev);
-	struct usb_composite_dev *cdev = uvc->func.config->cdev;
+	struct usb_composite_dev *cdev;
+
+	/* Reachable on a handle held across an unbind; see uvc_send_response. */
+	if (!uvc->func.config || !uvc->func.config->cdev)
+		return -ENODEV;
+	cdev = uvc->func.config->cdev;
 
 	strlcpy(cap->driver, "g_uvc", sizeof(cap->driver));
 	strlcpy(cap->card, cdev->gadget->name, sizeof(cap->card));

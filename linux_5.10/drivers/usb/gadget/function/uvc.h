@@ -52,14 +52,36 @@ extern unsigned int uvc_gadget_trace_param;
 			printk(KERN_DEBUG "uvcvideo: " msg); \
 	} while (0)
 
-#define uvcg_dbg(f, fmt, args...) \
-	dev_dbg(&(f)->config->cdev->gadget->dev, "%s: " fmt, (f)->name, ##args)
-#define uvcg_info(f, fmt, args...) \
-	dev_info(&(f)->config->cdev->gadget->dev, "%s: " fmt, (f)->name, ##args)
-#define uvcg_warn(f, fmt, args...) \
-	dev_warn(&(f)->config->cdev->gadget->dev, "%s: " fmt, (f)->name, ##args)
-#define uvcg_err(f, fmt, args...) \
-	dev_err(&(f)->config->cdev->gadget->dev, "%s: " fmt, (f)->name, ##args)
+/* A V4L2 handle on the streaming node outlives the function: uvc_unbind()
+ * calls video_unregister_device(), which does not wait for open descriptors,
+ * so uvc_v4l2_release() still runs afterwards and logs from there. By then
+ * f->config is NULL, and &f->config->cdev->gadget->dev is pointer arithmetic
+ * on NULL - a small non-NULL address that dev_printk() dereferences without
+ * hesitation. That fires as an oops inside __fput() during do_exit(), which
+ * the kernel cannot unwind ("Fixing recursive fault but reboot is needed"),
+ * leaving the closing task unkillable in D state forever.
+ *
+ * Resolving the device defensively costs one branch per message and turns
+ * every late log into a no-op instead of a fault.
+ */
+static inline struct device *uvcg_dev(struct usb_function *f)
+{
+	if (!f || !f->config || !f->config->cdev || !f->config->cdev->gadget)
+		return NULL;
+	return &f->config->cdev->gadget->dev;
+}
+
+#define uvcg_printk(level, f, fmt, args...)				\
+	do {								\
+		struct device *__uvcg_dev = uvcg_dev(f);		\
+		if (__uvcg_dev)						\
+			level(__uvcg_dev, "%s: " fmt, (f)->name, ##args); \
+	} while (0)
+
+#define uvcg_dbg(f, fmt, args...)  uvcg_printk(dev_dbg,  f, fmt, ##args)
+#define uvcg_info(f, fmt, args...) uvcg_printk(dev_info, f, fmt, ##args)
+#define uvcg_warn(f, fmt, args...) uvcg_printk(dev_warn, f, fmt, ##args)
+#define uvcg_err(f, fmt, args...)  uvcg_printk(dev_err,  f, fmt, ##args)
 
 /* ------------------------------------------------------------------------
  * Driver specific constants
@@ -71,7 +93,23 @@ extern unsigned int uvc_gadget_trace_param;
  * single frame and the refill has to win a 125us race to keep it fed. The
  * same lever on the OUT side - f_uac2's req_number, raised from 4 to 8 - cut
  * duplicated audio blocks from 60.5% to 26.3%, so give the video IN endpoint
- * the same headroom and more. At 768 bytes a request this costs 12 KB.
+ * the same headroom and more.
+ *
+ * Sixteen was still not enough. Measured over one streaming session:
+ *
+ *	20856 requests, 123 short (123 zero), 0 errored,
+ *	123 frames marked bad, 14756401 of 14839104 bytes sent
+ *
+ * 123 isochronous requests completed with actual == 0, dropping 82703 queued
+ * bytes (0.56%) and corrupting a JPEG every time. At 768 bytes a microframe a
+ * sixteen deep ring covers only 2 ms, so any scheduling gap longer than that
+ * on this single core empties it. Thirty two doubles the window to 4 ms, the
+ * same lever and the same count that ended the audio repeats in c0060b9.
+ *
+ * This costs buffers only: the endpoint count and the tx FIFO seating are set
+ * by maxpacket (768), not by ring depth, and dwc2 gives an isochronous
+ * endpoint MAX_DMA_DESC_NUM_HS_ISOC (256) descriptors, so 32 fits with room.
+ * At 768 bytes a request this costs 24 KB.
  */
 #define UVC_NUM_REQUESTS			16
 #define UVC_MAX_REQUEST_SIZE			64
