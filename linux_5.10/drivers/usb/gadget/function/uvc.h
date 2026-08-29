@@ -120,6 +120,24 @@ static inline struct device *uvcg_dev(struct usb_function *f)
  * Structures
  */
 
+struct uvc_video;
+
+/*
+ * Per request state, reached from the completion handler through
+ * usb_request::context.
+ *
+ * A lost payload is only ever reported when the request that carried it
+ * completes, and by then the encoder is up to UVC_NUM_REQUESTS payloads
+ * further on - most of a frame at 768 bytes a payload. Recording which frame
+ * a request was filled from is what lets the completion say "this frame lost
+ * a payload" rather than "some frame did", which is the whole difference
+ * between labelling the damaged frame and labelling the good one after it.
+ */
+struct uvcg_request {
+	struct uvc_video *video;
+	unsigned int frame;
+};
+
 struct uvc_video {
 	struct uvc_device *uvc;
 	struct usb_ep *ep;
@@ -137,11 +155,30 @@ struct uvc_video {
 	 * all. Count what was queued against what actually went out, so a run
 	 * that is fixed can be told apart from a run that was lucky.
 	 */
-	/* Set when a payload of the frame being encoded did not reach the
-	 * host, cleared when the next frame starts.
+	/* Serial of the frame the encoder is filling requests from. Every
+	 * request carries the serial it was filled at, so a completion can be
+	 * attributed to the frame that actually lost the payload.
+	 */
+	unsigned int frame_seq;
+	/* Payloads of frame_seq that are queued and have not completed yet.
+	 * The payload that carries EOF waits for this to reach zero, so the
+	 * frame's fate is settled before the last chance to label it is spent.
+	 * It costs no time on the wire: the ring is still full of this frame's
+	 * earlier payloads, so the encoder was only running ahead of a queue
+	 * that had nowhere to put the result.
+	 */
+	unsigned int frame_inflight;
+	/* Set when a payload of frame_seq did not reach the host, cleared when
+	 * the frame ends.
 	 */
 	unsigned int frame_bad;
 	unsigned int frames_marked;
+	/* Frames whose loss was reported after every payload of theirs had
+	 * already been encoded, so none was left to carry the error bit. With
+	 * the EOF payload held back this should stay at zero; it is here so
+	 * that "the host was told" can be told apart from "the host was not".
+	 */
+	unsigned int frames_late;
 	unsigned int req_queued;
 	unsigned int req_short;
 	unsigned int req_zero;
@@ -161,10 +198,16 @@ struct uvc_video {
 	unsigned int req_size;
 	struct usb_request *req[UVC_NUM_REQUESTS];
 	__u8 *req_buffer[UVC_NUM_REQUESTS];
+	struct uvcg_request req_ctx[UVC_NUM_REQUESTS];
 	struct list_head req_free;
 	spinlock_t req_lock;
 
-	void (*encode) (struct usb_request *req, struct uvc_video *video,
+	/* Answers -EAGAIN when the request cannot be filled yet, which is how
+	 * the last payload of a frame waits for the frame's earlier payloads
+	 * to retire. The pump returns the request unqueued and comes back on
+	 * the next completion.
+	 */
+	int (*encode) (struct usb_request *req, struct uvc_video *video,
 			struct uvc_buffer *buf);
 
 	/* Context data used by the completion handler */

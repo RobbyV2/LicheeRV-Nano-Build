@@ -68,13 +68,60 @@ uvc_video_encode_data(struct uvc_video *video, struct uvc_buffer *buf,
 	return nbytes;
 }
 
-static void
+/*
+ * Ends the frame the encoder has just finished filling: hands the buffer back,
+ * flips the frame ID, and starts a new serial so that requests still in flight
+ * for the frame just ended are no longer mistaken for the new one's.
+ *
+ * Called with queue->irqlock held; req_lock nests inside it here and nowhere
+ * takes them the other way round.
+ */
+static void uvc_video_frame_done(struct uvc_video *video, struct uvc_buffer *buf)
+{
+	video->queue.buf_used = 0;
+	buf->state = UVC_BUF_STATE_DONE;
+	uvcg_queue_next_buffer(&video->queue, buf);
+	video->fid ^= UVC_STREAM_FID;
+
+	spin_lock(&video->req_lock);
+	if (video->frame_bad) {
+		video->frames_marked++;
+		video->frame_bad = 0;
+	}
+	video->frame_seq++;
+	/* The payloads of the frame just ended keep their old serial, so their
+	 * completions no longer touch this counter.
+	 */
+	video->frame_inflight = 0;
+	spin_unlock(&video->req_lock);
+}
+
+/*
+ * Gives up on the frame being encoded. Used where a payload was counted
+ * against the frame but will never reach a completion handler, which would
+ * otherwise leave the frame's last payload waiting forever for it to retire.
+ */
+static void uvc_video_frame_abandon(struct uvc_video *video)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&video->req_lock, flags);
+	video->frame_seq++;
+	video->frame_inflight = 0;
+	video->frame_bad = 0;
+	spin_unlock_irqrestore(&video->req_lock, flags);
+}
+
+static int
 uvc_video_encode_bulk(struct usb_request *req, struct uvc_video *video,
 		struct uvc_buffer *buf)
 {
+	struct uvcg_request *ctx = req->context;
 	void *mem = req->buf;
 	int len = video->req_size;
 	int ret;
+
+	ctx->frame = video->frame_seq;
 
 	/* Add a header at the beginning of the payload. */
 	if (video->payload_size == 0) {
@@ -95,27 +142,50 @@ uvc_video_encode_bulk(struct usb_request *req, struct uvc_video *video,
 	req->zero = video->payload_size == video->max_payload_size;
 
 	if (buf->bytesused == video->queue.buf_used) {
-		video->queue.buf_used = 0;
-		buf->state = UVC_BUF_STATE_DONE;
-		uvcg_queue_next_buffer(&video->queue, buf);
-		video->fid ^= UVC_STREAM_FID;
-
+		uvc_video_frame_done(video, buf);
 		video->payload_size = 0;
 	}
 
 	if (video->payload_size == video->max_payload_size ||
 	    buf->bytesused == video->queue.buf_used)
 		video->payload_size = 0;
+
+	return 0;
 }
 
 #if !IS_ENABLED(CONFIG_USB_UVCG_SG_TRANSFER)
-static void
+static int
 uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 		struct uvc_buffer *buf)
 {
+	struct uvcg_request *ctx = req->context;
 	void *mem = req->buf;
 	int len = video->req_size;
 	int ret;
+	bool last, wait;
+
+	/* Whether this payload is the one that will carry EOF. */
+	last = buf->bytesused - video->queue.buf_used <= (unsigned int)(len - 2);
+
+	spin_lock(&video->req_lock);
+	wait = last && video->frame_inflight;
+	spin_unlock(&video->req_lock);
+
+	/*
+	 * The header of this payload is the last chance to tell the host the
+	 * frame is damaged, and a damaged frame is only discovered when the
+	 * request that lost the payload completes. So the last payload waits
+	 * for the frame's earlier ones to retire.
+	 *
+	 * This is free. The ring is still full of this frame's payloads, so
+	 * the encoder was only running ahead of a queue with nowhere to put
+	 * the result; the EOF payload goes out in the same microframe either
+	 * way. What it buys is that "bad" is known before the bit is spent.
+	 */
+	if (wait)
+		return -EAGAIN;
+
+	ctx->frame = video->frame_seq;
 
 	/* Add the header. */
 	ret = uvc_video_encode_header(video, buf, mem, len);
@@ -128,25 +198,25 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 
 	req->length = video->req_size - len;
 
-	if (buf->bytesused == video->queue.buf_used) {
-		video->queue.buf_used = 0;
-		buf->state = UVC_BUF_STATE_DONE;
-		uvcg_queue_next_buffer(&video->queue, buf);
-		video->fid ^= UVC_STREAM_FID;
-		if (video->frame_bad) {
-			video->frames_marked++;
-			video->frame_bad = 0;
-		}
-	}
+	spin_lock(&video->req_lock);
+	video->frame_inflight++;
+	spin_unlock(&video->req_lock);
+
+	if (buf->bytesused == video->queue.buf_used)
+		uvc_video_frame_done(video, buf);
+
+	return 0;
 }
 #else
-static void
+static int
 uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 		struct uvc_buffer *buf)
 {
+	struct uvcg_request *ctx = req->context;
 	int i;
 	struct scatterlist *sg;
 
+	ctx->frame = video->frame_seq;
 	req->length = 0;
 
 	for_each_sg(req->sg, sg, UVCG_MAX_SG_NUM, i) {
@@ -166,15 +236,14 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 		req->length += sg->length;
 
 		if (buf->bytesused == video->queue.buf_used) {
-			video->queue.buf_used = 0;
-			buf->state = UVC_BUF_STATE_DONE;
-			uvcg_queue_next_buffer(&video->queue, buf);
-			video->fid ^= UVC_STREAM_FID;
+			uvc_video_frame_done(video, buf);
 			i++;
 			break;
 		}
 	}
 	req->num_sgs = i;
+
+	return 0;
 }
 #endif
 /* --------------------------------------------------------------------------
@@ -201,21 +270,33 @@ static int uvcg_video_ep_queue(struct uvc_video *video, struct usb_request *req)
 static void
 uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 {
-	struct uvc_video *video = req->context;
+	struct uvcg_request *ctx = req->context;
+	struct uvc_video *video = ctx->video;
 	struct uvc_video_queue *queue = &video->queue;
 	unsigned long flags;
 
+	spin_lock_irqsave(&video->req_lock, flags);
 	video->req_queued++;
 	video->bytes_queued += req->length;
 	video->bytes_sent += req->actual;
 	if (req->status)
 		video->req_err++;
+	/* Only this request's own frame is settled by it. A request left over
+	 * from a frame the encoder has already finished carries the old
+	 * serial and must not be counted against the frame now being filled.
+	 */
+	if (ctx->frame == video->frame_seq && video->frame_inflight)
+		video->frame_inflight--;
 	if (req->status == 0 && req->actual < req->length) {
 		video->req_short++;
 		if (req->actual == 0)
 			video->req_zero++;
-		video->frame_bad = 1;
+		if (ctx->frame == video->frame_seq)
+			video->frame_bad = 1;
+		else
+			video->frames_late++;
 	}
+	spin_unlock_irqrestore(&video->req_lock, flags);
 
 	switch (req->status) {
 	case 0:
@@ -290,7 +371,9 @@ uvc_video_alloc_requests(struct uvc_video *video)
 		video->req[i]->buf = video->req_buffer[i];
 		video->req[i]->length = 0;
 		video->req[i]->complete = uvc_video_complete;
-		video->req[i]->context = video;
+		video->req_ctx[i].video = video;
+		video->req_ctx[i].frame = video->frame_seq;
+		video->req[i]->context = &video->req_ctx[i];
 
 		list_add_tail(&video->req[i]->list, &video->req_free);
 	}
@@ -316,7 +399,9 @@ uvc_video_alloc_requests(struct uvc_video *video)
 		video->req[i]->num_sgs = 0;
 		video->req[i]->length = 0;
 		video->req[i]->complete = uvc_video_complete;
-		video->req[i]->context = video;
+		video->req_ctx[i].video = video;
+		video->req_ctx[i].frame = video->frame_seq;
+		video->req[i]->context = &video->req_ctx[i];
 		list_add_tail(&video->req[i]->list, &video->req_free);
 	}
 
@@ -373,10 +458,20 @@ static void uvcg_video_pump(struct work_struct *work)
 			break;
 		}
 
-		video->encode(req, video, buf);
+		/* The frame's last payload waits for the frame's earlier ones
+		 * to retire, so that a payload lost on the wire is known
+		 * before the header that could have said so is encoded. The
+		 * request goes back unqueued and every completion re-runs the
+		 * pump, so the wait ends on the retirement it is waiting for.
+		 */
+		if (video->encode(req, video, buf) == -EAGAIN) {
+			spin_unlock_irqrestore(&queue->irqlock, flags);
+			break;
+		}
 
 		if (!video->ep->enabled) {
 			spin_unlock_irqrestore(&queue->irqlock, flags);
+			uvc_video_frame_abandon(video);
 			uvcg_queue_cancel(queue, 0);
 			break;
 		}
@@ -385,6 +480,12 @@ static void uvcg_video_pump(struct work_struct *work)
 		spin_unlock_irqrestore(&queue->irqlock, flags);
 
 		if (ret < 0) {
+			/* This payload was counted against the frame and will
+			 * never complete, so nothing would ever retire it.
+			 * Forget the frame rather than leave the next last
+			 * payload waiting on a completion that cannot come.
+			 */
+			uvc_video_frame_abandon(video);
 			uvcg_queue_cancel(queue, 0);
 			break;
 		}
@@ -412,9 +513,9 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 
 	if (!enable) {
 		uvcg_info(&video->uvc->func,
-			  "VS stream stats: %u requests, %u short (%u zero), %u errored, %u frames marked bad, %u of %u bytes sent\n",
+			  "VS stream stats: %u requests, %u short (%u zero), %u errored, %u frames marked bad, %u marked too late, %u of %u bytes sent\n",
 			  video->req_queued, video->req_short, video->req_zero,
-			  video->req_err, video->frames_marked,
+			  video->req_err, video->frames_marked, video->frames_late,
 			  video->bytes_sent, video->bytes_queued);
 		cancel_work_sync(&video->pump);
 		uvcg_queue_cancel(&video->queue, 0);
@@ -432,8 +533,11 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 	video->req_short = 0;
 	video->req_zero = 0;
 	video->req_err = 0;
+	video->frame_seq = 0;
+	video->frame_inflight = 0;
 	video->frame_bad = 0;
 	video->frames_marked = 0;
+	video->frames_late = 0;
 	video->bytes_queued = 0;
 	video->bytes_sent = 0;
 
