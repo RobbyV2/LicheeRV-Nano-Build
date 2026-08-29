@@ -48,16 +48,21 @@ MODULE_PARM_DESC(idle_depth,
  * Whether the payload carrying EOF waits for the frame's earlier payloads to
  * retire, so that the header can still say the frame is damaged.
  *
- * The wait was worth having while it was believed the host acted on
- * UVC_STREAM_ERR. It does not: the Windows host decodes and displays a frame
- * marked bad exactly as it displays a good one. What the wait still costs is
- * real - the chain drains completely while the last payload is held back, so
- * dwc2 returns target_frame to TARGET_FRAME_INITIAL and the endpoint has to be
- * restarted a second time for that one payload, and a restart is where this
- * controller loses payloads. Off by default; the knob is here so the two can be
- * compared on the same hardware in the same session.
+ * The wait was introduced to make the error bit in the payload header accurate,
+ * and that purpose is gone: this host decodes and displays a frame marked bad
+ * exactly as it displays a good one. The wait is kept anyway, because knowing
+ * the frame is damaged before its last payload is encoded is also what lets
+ * drop_bad end the frame instead of finishing it, and ending it is the only
+ * thing that reaches this host at all.
+ *
+ * It is not free: the chain drains completely while the last payload is held
+ * back, so dwc2 returns target_frame to TARGET_FRAME_INITIAL and the endpoint
+ * is restarted a second time for that one payload - and a restart is where this
+ * controller loses payloads. Whether that costs more than the drop saves has
+ * not been measured; the host has to open the camera for the question to have
+ * an answer. Until it does, the default is the behaviour the board already had.
  */
-static bool uvcg_eof_hold;
+static bool uvcg_eof_hold = true;
 module_param_named(eof_hold, uvcg_eof_hold, bool, 0644);
 MODULE_PARM_DESC(eof_hold,
 		 "hold a frame's last payload until its earlier ones retire");
