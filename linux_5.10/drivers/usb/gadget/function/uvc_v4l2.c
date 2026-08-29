@@ -309,6 +309,7 @@ uvc_v4l2_open(struct file *file)
 	handle->device = &uvc->video;
 	file->private_data = &handle->vfh;
 
+	uvc->func_connected = true;
 	uvc_function_connect(uvc);
 	return 0;
 }
@@ -332,6 +333,12 @@ uvc_v4l2_release(struct file *file)
 	v4l2_fh_del(&handle->vfh);
 	v4l2_fh_exit(&handle->vfh);
 	kfree(handle);
+
+	/* Last touch of uvc on this path: unbind may be waiting on this to
+	 * free the struct this vdev is embedded in.
+	 */
+	uvc->func_connected = false;
+	wake_up_interruptible(&uvc->func_connected_queue);
 
 	return 0;
 }

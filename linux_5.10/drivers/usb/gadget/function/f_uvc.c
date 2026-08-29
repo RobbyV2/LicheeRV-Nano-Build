@@ -927,8 +927,29 @@ static void uvc_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct usb_composite_dev *cdev = c->cdev;
 	struct uvc_device *uvc = to_uvc(f);
+	long wait_ret;
 
 	uvcg_info(f, "%s\n", __func__);
+
+	/* struct video_device is embedded in struct uvc_device and uvc_free()
+	 * kfree()s the whole thing, but video_unregister_device() below does
+	 * not wait for open descriptors. A handle held across this point then
+	 * leaves v4l2_release() dereferencing freed memory, which faults inside
+	 * __fput() during do_exit() where the kernel cannot unwind it: the task
+	 * is left unkillable in D state and the board needs a reboot.
+	 *
+	 * Give the holder a bounded chance to close first. The wait is short
+	 * and always expires, so an unlink can still not hang - a camera must
+	 * not be able to take the gadget away from HID and the NIC.
+	 */
+	if (uvc->func_connected) {
+		wait_ret = wait_event_interruptible_timeout(
+				uvc->func_connected_queue,
+				uvc->func_connected == false,
+				msecs_to_jiffies(500));
+		if (wait_ret == 0)
+			uvcg_warn(f, "wait for v4l2 release timed out\n");
+	}
 
 	device_remove_file(&uvc->vdev.dev, &dev_attr_function_name);
 	uvcg_video_exit(&uvc->video);
@@ -952,6 +973,7 @@ static struct usb_function *uvc_alloc(struct usb_function_instance *fi)
 		return ERR_PTR(-ENOMEM);
 
 	mutex_init(&uvc->video.mutex);
+	init_waitqueue_head(&uvc->func_connected_queue);
 	uvc->state = UVC_STATE_DISCONNECTED;
 	opts = fi_to_f_uvc_opts(fi);
 

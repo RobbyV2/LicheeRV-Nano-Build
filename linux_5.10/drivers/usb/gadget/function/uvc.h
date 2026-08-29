@@ -12,6 +12,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
+#include <linux/wait.h>
 #include <linux/usb/composite.h>
 #include <linux/videodev2.h>
 
@@ -202,6 +203,15 @@ struct uvc_device {
 	void *control_buf;
 
 	unsigned int streaming_intf;
+
+	/* Whether a V4L2 handle is open on the streaming node. struct
+	 * video_device is embedded in this struct and uvc_free() kfree()s the
+	 * lot, so a handle that outlives the function leaves the v4l2 core
+	 * dereferencing freed memory in v4l2_release(). uvc_function_unbind()
+	 * waits on this, bounded, so the common case closes first.
+	 */
+	bool func_connected;
+	wait_queue_head_t func_connected_queue;
 
 	/* Events */
 	unsigned int event_length;
