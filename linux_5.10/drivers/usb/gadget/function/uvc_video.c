@@ -50,19 +50,23 @@ MODULE_PARM_DESC(idle_depth,
  *
  * The wait was introduced to make the error bit in the payload header accurate,
  * and that purpose is gone: this host decodes and displays a frame marked bad
- * exactly as it displays a good one. The wait is kept anyway, because knowing
- * the frame is damaged before its last payload is encoded is also what lets
- * drop_bad end the frame instead of finishing it, and ending it is the only
- * thing that reaches this host at all.
+ * exactly as it displays a good one.
  *
- * It is not free: the chain drains completely while the last payload is held
- * back, so dwc2 returns target_frame to TARGET_FRAME_INITIAL and the endpoint
- * is restarted a second time for that one payload - and a restart is where this
- * controller loses payloads. Whether that costs more than the drop saves has
- * not been measured; the host has to open the camera for the question to have
- * an answer. Until it does, the default is the behaviour the board already had.
+ * Nor is it needed for drop_bad, which is the one thing that does reach this
+ * host. The ring is deep enough that a lost payload is reported while the
+ * encoder is still filling the same frame: measured with the wait off, 15 of 16
+ * losses still set frame_bad in time for the frame to be abandoned, and one
+ * arrived too late. With the wait on, the frame's last payload is itself the one
+ * most often lost - it goes out alone, as the only descriptor of a chain the
+ * hold emptied and dwc2 had to rebuild - and a loss reported by that payload is
+ * always too late by construction, because the frame ended when it was encoded:
+ * 9 frames abandoned against 10 reported too late.
+ *
+ * So it is off: a cost with nothing left on the other side of it. How large the
+ * cost is has not been isolated - a swept comparison is the only way to say, and
+ * it needs the host to keep the camera open for longer than it has.
  */
-static bool uvcg_eof_hold = true;
+static bool uvcg_eof_hold;
 module_param_named(eof_hold, uvcg_eof_hold, bool, 0644);
 MODULE_PARM_DESC(eof_hold,
 		 "hold a frame's last payload until its earlier ones retire");
@@ -231,8 +235,29 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 	int ret;
 	bool last, wait, bad;
 
+	/* Whether this payload is the one that will carry EOF. */
+	last = buf->bytesused - video->queue.buf_used <= (unsigned int)(len - 2);
+
+	/*
+	 * "Has this frame lost a payload" and "have its earlier payloads
+	 * retired" have to be read together, under one hold of the lock.
+	 *
+	 * Read apart they raced, and not in a way that could be waved off as
+	 * unlikely: the completion that releases the wait is the same
+	 * completion that reports the loss, so the single most likely instant
+	 * for one to land between the two reads is the instant the hold exists
+	 * to catch. Seen that way round it makes bad stale-false and the wait
+	 * false at once, and the frame the hold was built to abandon is the
+	 * one frame that gets through intact.
+	 *
+	 * A frame already known bad waits for nothing. There is no news left
+	 * for the hold to collect, and either drop_bad is about to end the
+	 * frame or the error bit is about to be spent on it.
+	 */
 	spin_lock(&video->req_lock);
 	bad = video->frame_bad;
+	wait = uvcg_eof_hold && last && !bad &&
+	       video->frame_inflight > uvcg_eof_slack;
 	spin_unlock(&video->req_lock);
 
 	/*
@@ -247,13 +272,6 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 		uvc_video_frame_done(video, buf);
 		return -ENODATA;
 	}
-
-	/* Whether this payload is the one that will carry EOF. */
-	last = buf->bytesused - video->queue.buf_used <= (unsigned int)(len - 2);
-
-	spin_lock(&video->req_lock);
-	wait = uvcg_eof_hold && last && video->frame_inflight;
-	spin_unlock(&video->req_lock);
 
 	/*
 	 * The header of this payload is the last chance to tell the host the
@@ -270,6 +288,7 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 		return -EAGAIN;
 
 	ctx->frame = video->frame_seq;
+	ctx->eof = last;
 
 	/* Add the header. */
 	ret = uvc_video_encode_header(video, buf, mem, len);
@@ -282,9 +301,31 @@ uvc_video_encode_isoc(struct usb_request *req, struct uvc_video *video,
 
 	req->length = video->req_size - len;
 
+	/*
+	 * Ask once more, now that there is nothing left to encode. Filling a
+	 * payload is most of a kilobyte of memcpy, which is long enough for a
+	 * completion to land inside it and report a loss the header above was
+	 * written without - and the frame would then be finished and sent,
+	 * counted as marked but never dropped. Asking again turns that whole
+	 * window into a drop. What remains is the handful of instructions
+	 * between this read and the frame ending, which is the last point at
+	 * which any of this frame is still unqueued.
+	 *
+	 * The bytes already copied into this request are simply not sent.
+	 * uvc_video_frame_done() resets buf_used, so the next frame starts
+	 * from the top of its own buffer.
+	 */
 	spin_lock(&video->req_lock);
-	video->frame_inflight++;
+	bad = video->frame_bad;
+	if (!bad)
+		video->frame_inflight++;
 	spin_unlock(&video->req_lock);
+
+	if (uvcg_drop_bad && bad) {
+		video->frames_dropped++;
+		uvc_video_frame_done(video, buf);
+		return -ENODATA;
+	}
 
 	if (buf->bytesused == video->queue.buf_used)
 		uvc_video_frame_done(video, buf);
