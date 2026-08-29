@@ -111,7 +111,7 @@ static inline struct device *uvcg_dev(struct usb_function *f)
  * endpoint MAX_DMA_DESC_NUM_HS_ISOC (256) descriptors, so 32 fits with room.
  * At 768 bytes a request this costs 24 KB.
  */
-#define UVC_NUM_REQUESTS			16
+#define UVC_NUM_REQUESTS			32
 #define UVC_MAX_REQUEST_SIZE			64
 #define UVC_MAX_EVENTS				4
 
