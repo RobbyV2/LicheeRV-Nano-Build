@@ -357,7 +357,6 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
 			    size_t count, loff_t *offp)
 {
 	struct f_hidg *hidg  = file->private_data;
-	struct usb_composite_dev *cdev = hidg_cdev(hidg);
 	struct usb_request *req;
 	unsigned long flags;
 	ssize_t status = -ENOMEM;
