@@ -902,9 +902,27 @@ static void dwc2_gadget_config_nonisoc_xfer_ddma(struct dwc2_hsotg_ep *hs_ep,
  * frame info, sets Last and IOC bits increments next_desc. If filled
  * descriptor is not the first one, removes L bit from the previous descriptor
  * status.
+ *
+ * @ioc says whether this descriptor should raise an interrupt when the core is
+ * done with it. Upstream sets it on every descriptor, which on an isochronous
+ * IN endpoint that is deliberately kept full costs one interrupt per microframe
+ * - 8000 a second on a high-speed endpoint, each of them an interrupt, a
+ * completion sweep and a work item, whether or not the packet carried anything.
+ * Clearing it is safe because dwc2_gadget_complete_isoc_request_ddma() already
+ * walks every descriptor that has reached DMA-done rather than just one, so a
+ * single interrupt retires the whole batch behind it.
+ *
+ * It cannot be cleared unconditionally: a function that asks for no interrupt on
+ * everything it queues would never be told to refill the chain, and the chain
+ * would run out. DWC2_ISOC_IOC_RUN caps how many descriptors may go by without
+ * one, so the endpoint is heard from at least that often no matter what the
+ * function above asks for.
  */
+#define DWC2_ISOC_IOC_RUN	16
+
 static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
-				      dma_addr_t dma_buff, unsigned int len)
+				      dma_addr_t dma_buff, unsigned int len,
+				      bool ioc)
 {
 	struct dwc2_dma_desc *desc;
 	struct dwc2_hsotg *hsotg = hs_ep->parent;
@@ -946,8 +964,18 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
 	if (!len && !dma_buff)
 		dma_buff = hs_ep->desc_list_dma;
 
+	if (!ioc) {
+		hs_ep->isoc_noioc++;
+		if (++hs_ep->noioc_run >= DWC2_ISOC_IOC_RUN) {
+			hs_ep->isoc_noioc_forced++;
+			ioc = true;
+		}
+	}
+	if (ioc)
+		hs_ep->noioc_run = 0;
+
 	desc->buf = dma_buff;
-	desc->status |= (DEV_DMA_L | DEV_DMA_IOC |
+	desc->status |= (DEV_DMA_L | (ioc ? DEV_DMA_IOC : 0) |
 			 ((len << DEV_DMA_NBYTES_SHIFT) & mask));
 
 	if (hs_ep->dir_in) {
@@ -1017,6 +1045,7 @@ static void dwc2_gadget_start_isoc_ddma(struct dwc2_hsotg_ep *hs_ep)
 	}
 
 	hs_ep->next_desc = 0;
+	hs_ep->noioc_run = 0;
 	list_for_each_entry_safe(hs_req, treq, &hs_ep->queue, queue) {
 		dma_addr_t dma_addr = hs_req->req.dma;
 
@@ -1025,7 +1054,8 @@ static void dwc2_gadget_start_isoc_ddma(struct dwc2_hsotg_ep *hs_ep)
 			dma_addr = sg_dma_address(hs_req->req.sg);
 		}
 		ret = dwc2_gadget_fill_isoc_desc(hs_ep, dma_addr,
-						 hs_req->req.length);
+						 hs_req->req.length,
+						 !hs_req->req.no_interrupt);
 		if (ret)
 			break;
 	}
@@ -1542,7 +1572,8 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 			}
 
 			dwc2_gadget_fill_isoc_desc(hs_ep, dma_addr,
-						   hs_req->req.length);
+						   hs_req->req.length,
+						   !hs_req->req.no_interrupt);
 		}
 		return 0;
 	}
@@ -2421,6 +2452,7 @@ static void dwc2_gadget_handle_isoc_bna(struct dwc2_hsotg_ep *hs_ep)
 	hs_ep->target_frame = TARGET_FRAME_INITIAL;
 	hs_ep->next_desc = 0;
 	hs_ep->compl_desc = 0;
+	hs_ep->noioc_run = 0;
 }
 
 /**

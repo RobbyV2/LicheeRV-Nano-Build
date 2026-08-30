@@ -211,6 +211,10 @@ struct uvc_video {
 	 */
 	unsigned int req_idle;
 	unsigned int idle_inflight;
+	/* Which keep-alive this is, so that every idle_ioc-th one can be the
+	 * one that asks for a completion interrupt. Only the pump touches it.
+	 */
+	unsigned int idle_seq;
 	/* The stats line is the only window onto the loss rate, and it used to
 	 * be printed once, when the host stopped the stream. Nothing on this
 	 * board can make the host stop on demand, so print it on a timer as

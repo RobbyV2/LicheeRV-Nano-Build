@@ -269,6 +269,8 @@ static int ep_show(struct seq_file *seq, void *v)
 	seq_printf(seq, "isoc_epdis=%u incompl=%u bna=%u bna_kept=%u cpl=%u\n",
 		   ep->isoc_epdis, ep->isoc_incompl, ep->isoc_bna,
 		   ep->isoc_bna_kept, ep->isoc_cpl_in);
+	seq_printf(seq, "isoc_noioc=%u forced=%u run=%u\n",
+		   ep->isoc_noioc, ep->isoc_noioc_forced, ep->noioc_run);
 	if (ep->isoc_log_head) {
 		unsigned int n = min_t(unsigned int, ep->isoc_log_head,
 				       (unsigned int)DWC2_ISOC_LOG_N);

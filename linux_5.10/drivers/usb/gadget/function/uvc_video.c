@@ -58,6 +58,42 @@ MODULE_PARM_DESC(idle_depth,
 		 "empty payloads kept queued on the isoc IN endpoint while idle");
 
 /*
+ * One completion interrupt per this many keep-alive payloads.
+ *
+ * Keeping the chain fed is not free, and the bill does not scale with
+ * idle_depth: an isochronous IN endpoint sends one packet per microframe
+ * whatever the depth, so a chain that is never allowed to run out completes
+ * 8000 requests a second, and dwc2 stamps interrupt-on-complete into every
+ * descriptor it fills. Measured on an SG2002 at 640x480/30 with the host
+ * pulling the stream, 43 payloads to the frame:
+ *
+ *	not streaming, any depth	1000 irq/s, 81% idle
+ *	streaming, idle_depth=32	~8800 irq/s, 19-32% idle
+ *
+ * and at that load the board went off the network entirely - the same
+ * signature as the idle_depth=8 outage, and for the same reason, because 8 and
+ * 32 cost exactly the same 8000 interrupts a second. The depth is the chain's
+ * lead; this is its price.
+ *
+ * Nothing needs to hear about every keep-alive. They carry no payload, belong
+ * to no frame, and the only thing their completion does is hand the request
+ * back so the pump can queue it again - which the pump can just as well do
+ * eight at a time. dwc2 sweeps every descriptor that has reached DMA-done on
+ * each interrupt, not one, so batching costs no request and no ordering.
+ *
+ * The stride only has to stay well inside the chain's lead: at depth 32 and
+ * stride 8 the refill happens every millisecond with 24 descriptors still
+ * queued ahead of the core. One disables the batching. Zero would ask for no
+ * interrupts at all, which dwc2 refuses - it forces one every
+ * DWC2_ISOC_IOC_RUN descriptors regardless - so the smallest real interval is
+ * still bounded by the hardware side.
+ */
+static unsigned int uvcg_idle_ioc = 8;
+module_param_named(idle_ioc, uvcg_idle_ioc, uint, 0644);
+MODULE_PARM_DESC(idle_ioc,
+		 "one completion interrupt per this many keep-alive payloads");
+
+/*
  * Whether the payload carrying EOF waits for the frame's earlier payloads to
  * retire, so that the header can still say the frame is damaged.
  *
@@ -653,6 +689,12 @@ static bool uvc_video_queue_idle(struct uvc_video *video, struct usb_request *re
 	ctx->idle = true;
 	req->length = 0;
 	req->zero = 0;
+	/* Ask to be told about one keep-alive in uvcg_idle_ioc, not all of
+	 * them. The counter is only ever touched from the pump, which is a
+	 * single work item, so it needs no lock of its own.
+	 */
+	req->no_interrupt = uvcg_idle_ioc > 1 &&
+			    (video->idle_seq++ % uvcg_idle_ioc) != 0;
 #if IS_ENABLED(CONFIG_USB_UVCG_SG_TRANSFER)
 	req->num_sgs = 0;
 #endif
@@ -744,6 +786,11 @@ static void uvcg_video_pump(struct work_struct *work)
 
 		ctx = req->context;
 		ctx->idle = false;
+		/* A payload's completion is the only report of its loss, and
+		 * the request was last used as a keep-alive, so the batching
+		 * flag has to be taken back off it explicitly.
+		 */
+		req->no_interrupt = 0;
 
 		if (!video->ep->enabled) {
 			spin_unlock_irqrestore(&queue->irqlock, flags);
@@ -803,6 +850,7 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 
 	video->req_idle = 0;
 	video->idle_inflight = 0;
+	video->idle_seq = 0;
 	video->stats_next = jiffies + UVCG_STATS_PERIOD;
 	video->req_queued = 0;
 	video->req_short = 0;

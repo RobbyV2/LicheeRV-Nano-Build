@@ -208,6 +208,15 @@ struct dwc2_hsotg_ep {
 	unsigned int            isoc_bna;
 	unsigned int            isoc_bna_kept;
 	unsigned int            isoc_cpl_in;
+	/* Descriptors filled without an interrupt-on-complete bit, and how
+	 * many of those have gone by since the last one that carried it. A
+	 * function that asks for no completion news on every packet still has
+	 * to be given some, or the chain is never refilled and nothing ever
+	 * completes; the run is what enforces that.
+	 */
+	unsigned int            isoc_noioc;
+	unsigned int            isoc_noioc_forced;
+	unsigned int            noioc_run;
 #define DWC2_ISOC_LOG_N		48
 	struct dwc2_isoc_ev {
 		u32		sts;
