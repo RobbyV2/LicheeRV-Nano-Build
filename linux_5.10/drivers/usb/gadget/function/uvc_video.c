@@ -50,21 +50,23 @@
  * Thirty two is also what the request ring holds, so at this depth the
  * endpoint is simply never idle.
  *
- * It ships OFF all the same. Measured on this board, a chain kept full is what
- * the host's isochronous IN tokens turn into 8000 completions a second, and at
- * that rate the board stopped answering ping, ARP, SSH and its own control
- * endpoint three times in one session - once for 25 minutes, once for 44, and
- * once for as long as it took someone to reach the power. Batching the
- * completion interrupts (see idle_ioc) cut the rate and bought a 20 second
- * stream, but a 40 second one still took the board down, so the batching is not
- * the whole answer and this is not a default anyone should be shipped.
+ * What it costs was measured, and it is not small. Under streaming with the
+ * host pulling, the USB interrupt runs at 8252-9298 a second against 1000 when
+ * the endpoint is idle, and the CPU goes from 81% idle to 19-32% idle. That
+ * cost is the same at every nonzero depth, because an isochronous IN endpoint
+ * sends one packet per microframe whatever the chain's lead is; depth 8 is not
+ * cheaper than 32, only shallower. See idle_ioc for the half of it that can be
+ * given back.
  *
- * Off costs a torn frame in seven at 34 payloads to the frame. That is a bad
- * picture; a board that has to be power cycled is a bad device. Turn it up at
- * runtime to measure, and do not raise the default again until a stream has
- * been held open for an hour at it.
+ * The board also went off the network three times in the session that measured
+ * this, for 25, 44 and 20 minutes. Those outages are NOT attributed: a second
+ * agent was flashing and streaming to the same board throughout, and the kernel
+ * under test carried two chain-restart bugs of its own. The default is left at
+ * 32 because that is what has been running and what is being measured against;
+ * whether it is safe is still open, and the way to close it is an hour-long
+ * stream on an uncontended board.
  */
-static unsigned int uvcg_idle_depth;
+static unsigned int uvcg_idle_depth = 32;
 module_param_named(idle_depth, uvcg_idle_depth, uint, 0644);
 MODULE_PARM_DESC(idle_depth,
 		 "empty payloads kept queued on the isoc IN endpoint while idle");
