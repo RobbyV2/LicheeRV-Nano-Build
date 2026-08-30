@@ -1060,6 +1060,18 @@ static void dwc2_gadget_start_isoc_ddma(struct dwc2_hsotg_ep *hs_ep)
 			break;
 	}
 
+	/*
+	 * A rebuilt chain must never be interrupt-free. The requests kept
+	 * across a restart can all be keep-alives queued with no_interrupt
+	 * set, and noioc_run starts again from zero here, so a chain shorter
+	 * than DWC2_ISOC_IOC_RUN could otherwise be consumed to its end
+	 * without a word - nothing completes, the pump never runs, and the
+	 * endpoint just BNAs again. Give the last descriptor an IOC bit
+	 * unconditionally; at worst it is one extra interrupt per restart.
+	 */
+	if (hs_ep->next_desc)
+		hs_ep->desc_list[hs_ep->next_desc - 1].status |= DEV_DMA_IOC;
+
 	hs_ep->compl_desc = 0;
 	depctl = hs_ep->dir_in ? DIEPCTL(index) : DOEPCTL(index);
 	dma_reg = hs_ep->dir_in ? DIEPDMA(index) : DOEPDMA(index);
@@ -2288,7 +2300,11 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 
 		hs_req = get_ep_head(hs_ep);
 		if (!hs_req) {
-			dev_warn(hsotg->dev, "%s: ISOC EP queue empty\n", __func__);
+			/* Not worth a warning: the BNA handler sweeps here
+			 * with whatever is left, and an empty queue is then a
+			 * legitimate answer, not a bookkeeping fault.
+			 */
+			dev_dbg(hsotg->dev, "%s: ISOC EP queue empty\n", __func__);
 			return;
 		}
 		ureq = &hs_req->req;
@@ -2405,6 +2421,21 @@ static void dwc2_gadget_handle_isoc_bna(struct dwc2_hsotg_ep *hs_ep)
 	hs_ep->isoc_bna++;
 	if (!hs_ep->dir_in)
 		dwc2_flush_rx_fifo(hsotg);
+
+	/*
+	 * Descriptors the core has already finished may still be waiting for
+	 * their completion interrupt: one queued with no_interrupt set
+	 * reaches DMA-done silently, and only a later descriptor's IOC
+	 * brings the sweep that retires it. The status wipe below erases
+	 * that DMA-done record while the request it belongs to is still at
+	 * the head of the queue, so the restart would fill a fresh
+	 * descriptor for it and send it again - a stale payload replayed
+	 * onto the bus ahead of everything queued behind it. Sweep them out
+	 * first; the sweep stops at the first descriptor the core has not
+	 * finished, which is the one this BNA is about.
+	 */
+	if (hs_ep->dir_in)
+		dwc2_gadget_complete_isoc_request_ddma(hs_ep);
 
 	/*
 	 * BNA says the core reached a descriptor software had not made
