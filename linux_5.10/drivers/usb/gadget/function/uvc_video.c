@@ -48,11 +48,23 @@
  * never behind, and the loss all but disappears.
  *
  * Thirty two is also what the request ring holds, so at this depth the
- * endpoint is simply never idle. Writable at runtime so the trade can be swept
- * against the hardware rather than argued about; the default is the measured
- * good value rather than off, because off is the bug.
+ * endpoint is simply never idle.
+ *
+ * It ships OFF all the same. Measured on this board, a chain kept full is what
+ * the host's isochronous IN tokens turn into 8000 completions a second, and at
+ * that rate the board stopped answering ping, ARP, SSH and its own control
+ * endpoint three times in one session - once for 25 minutes, once for 44, and
+ * once for as long as it took someone to reach the power. Batching the
+ * completion interrupts (see idle_ioc) cut the rate and bought a 20 second
+ * stream, but a 40 second one still took the board down, so the batching is not
+ * the whole answer and this is not a default anyone should be shipped.
+ *
+ * Off costs a torn frame in seven at 34 payloads to the frame. That is a bad
+ * picture; a board that has to be power cycled is a bad device. Turn it up at
+ * runtime to measure, and do not raise the default again until a stream has
+ * been held open for an hour at it.
  */
-static unsigned int uvcg_idle_depth = 32;
+static unsigned int uvcg_idle_depth;
 module_param_named(idle_depth, uvcg_idle_depth, uint, 0644);
 MODULE_PARM_DESC(idle_depth,
 		 "empty payloads kept queued on the isoc IN endpoint while idle");

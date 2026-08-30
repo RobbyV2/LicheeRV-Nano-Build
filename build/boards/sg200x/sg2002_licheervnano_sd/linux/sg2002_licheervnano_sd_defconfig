@@ -548,13 +548,24 @@ CONFIG_MAGIC_SYSRQ=y
 # already worse than a reboot; twenty five minutes is not a trade anyone would
 # make.
 CONFIG_PANIC_TIMEOUT=10
-# And the soft lockup detector so that the next one leaves a stack behind
-# instead of a silence. Deliberately without BOOTPARAM_SOFTLOCKUP_PANIC: the
-# detector alone only prints, and kernel.softlockup_panic can be turned on with
-# sysctl when a run is expected to wedge. DETECT_HUNG_TASK stays off - five
-# CVITEK video threads sit in uninterruptible sleep forever by design and would
-# trip it on every boot.
+# And the soft lockup detector, so that the next one leaves a stack behind
+# instead of a silence.
 CONFIG_SOFTLOCKUP_DETECTOR=y
+# And make it act, not just print. Three times in one session this board went
+# off the network entirely - 25 minutes, 44 minutes, 20 minutes - answering
+# neither ping nor ARP nor its own USB control endpoint, and each time the only
+# thing that ended it was someone reaching the power. A spurious reboot would
+# cost seconds; the failure it replaces costs tens of minutes, so the trade is
+# not close. The threshold is twenty seconds of a CPU never scheduling, which
+# nothing legitimate on this board does.
+CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y
+# DETECT_HUNG_TASK takes "default SOFTLOCKUP_DETECTOR" in 5.10, so enabling the
+# soft lockup detector switches it on as a side effect. It has to go back off
+# explicitly: five CVITEK video threads (cvitask_isp_pre, cvitask_isp_bla,
+# cvitask_isp_err, vi_event_handle, cvitask_vc_wt1) sit in uninterruptible sleep
+# forever by design, and it reported every one of them 120 seconds into the
+# first boot that had it.
+# CONFIG_DETECT_HUNG_TASK is not set
 CONFIG_INPUT_MISC=y
 CONFIG_INPUT_UINPUT=y
 # CONFIG_MAGIC_SYSRQ_SERIAL is not set
