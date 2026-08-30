@@ -539,6 +539,22 @@ CONFIG_KEYBOARD_GPIO=y
 CONFIG_INPUT_TOUCHSCREEN=y
 CONFIG_TOUCHSCREEN_HYNITRON_TS=y
 CONFIG_MAGIC_SYSRQ=y
+# A panic on this board used to be indistinguishable from the board being
+# unplugged: PANIC_TIMEOUT was 0, so the kernel stopped and stayed stopped, and
+# the only recovery was someone walking over to it. Measured twice - once with
+# idle_depth=8 and once with 32 - the board was off the network for twenty five
+# minutes and more, answering neither ping nor ARP, while its USB gadget still
+# looked enumerated to the attached host. Ten seconds of a stopped kernel is
+# already worse than a reboot; twenty five minutes is not a trade anyone would
+# make.
+CONFIG_PANIC_TIMEOUT=10
+# And the soft lockup detector so that the next one leaves a stack behind
+# instead of a silence. Deliberately without BOOTPARAM_SOFTLOCKUP_PANIC: the
+# detector alone only prints, and kernel.softlockup_panic can be turned on with
+# sysctl when a run is expected to wedge. DETECT_HUNG_TASK stays off - five
+# CVITEK video threads sit in uninterruptible sleep forever by design and would
+# trip it on every boot.
+CONFIG_SOFTLOCKUP_DETECTOR=y
 CONFIG_INPUT_MISC=y
 CONFIG_INPUT_UINPUT=y
 # CONFIG_MAGIC_SYSRQ_SERIAL is not set
