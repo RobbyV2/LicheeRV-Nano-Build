@@ -314,13 +314,36 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
 	return count;
 }
 
+/*
+ * A HID handle outlives the configuration it was opened on: userspace keeps
+ * /dev/hidgN open across a disconnect, and f->config is NULL from then until
+ * the next set_config. Every ERROR() here expands to dev_err(&cdev->gadget->dev),
+ * so resolving the cdev through f->config without checking is a NULL dereference
+ * on the write path of a disconnected gadget - the same fault that took the
+ * video node down through uvcg_info(). Resolve it defensively and say nothing
+ * when there is nowhere to say it.
+ */
+static struct usb_composite_dev *hidg_cdev(struct f_hidg *hidg)
+{
+	struct usb_configuration *config = hidg->func.config;
+
+	return config ? config->cdev : NULL;
+}
+
+#define hidg_err(hidg, fmt, args...)					\
+	do {								\
+		struct usb_composite_dev *__cdev = hidg_cdev(hidg);	\
+		if (__cdev)						\
+			ERROR(__cdev, fmt, ##args);			\
+	} while (0)
+
 static void f_hidg_req_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct f_hidg *hidg = (struct f_hidg *)ep->driver_data;
 	unsigned long flags;
 
 	if (req->status != 0) {
-		ERROR(hidg->func.config->cdev,
+		hidg_err(hidg,
 			"End Point Request ERROR: %d\n", req->status);
 	}
 
@@ -334,7 +357,7 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
 			    size_t count, loff_t *offp)
 {
 	struct f_hidg *hidg  = file->private_data;
-	struct usb_composite_dev *cdev = hidg->func.config->cdev;
+	struct usb_composite_dev *cdev = hidg_cdev(hidg);
 	struct usb_request *req;
 	unsigned long flags;
 	ssize_t status = -ENOMEM;
@@ -344,10 +367,19 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
 	 * in config descriptor is set and wakeup_on_write is enabled.
      * FIXME: cdev->config can be NULLed on disconnect.
 	 */
-	if (hidg->wakeup_on_write /*&& cdev->config->bmAttributes & 0x20*/){
-		usb_gadget_wakeup(cdev->gadget);
-		ERROR(hidg->func.config->cdev,
-			"usb_gadget_wakeup\n");
+	if (hidg->wakeup_on_write) {
+		struct usb_configuration *config = hidg->func.config;
+
+		/*
+		 * Remote wakeup is legal only once the host has set the
+		 * capability in the configuration it selected. Signalling it
+		 * regardless earns one "signalling skipped: is not allowed by
+		 * host" per keystroke and wakes nothing, and the log line that
+		 * went with it flooded the ring buffer at HID rates.
+		 */
+		if (config && config->cdev && config->cdev->gadget &&
+		    (config->bmAttributes & USB_CONFIG_ATT_WAKEUP))
+			usb_gadget_wakeup(config->cdev->gadget);
 	}
 
 
@@ -376,7 +408,7 @@ try_again:
 	status = copy_from_user(req->buf, buffer, count);
 
 	if (status != 0) {
-		ERROR(hidg->func.config->cdev,
+		hidg_err(hidg,
 			"copy_from_user error\n");
 		status = -EINVAL;
 		goto release_write_pending;
@@ -404,7 +436,7 @@ try_again:
 
 	status = usb_ep_queue(hidg->in_ep, req, GFP_ATOMIC);
 	if (status < 0) {
-		ERROR(hidg->func.config->cdev,
+		hidg_err(hidg,
 			"usb_ep_queue error on int endpoint %zd\n", status);
 		goto release_write_pending;
 	} else {
@@ -470,7 +502,6 @@ static inline struct usb_request *hidg_alloc_ep_req(struct usb_ep *ep,
 static void hidg_set_report_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct f_hidg *hidg = (struct f_hidg *) req->context;
-	struct usb_composite_dev *cdev = hidg->func.config->cdev;
 	struct f_hidg_req_list *req_list;
 	unsigned long flags;
 
@@ -478,7 +509,7 @@ static void hidg_set_report_complete(struct usb_ep *ep, struct usb_request *req)
 	case 0:
 		req_list = kzalloc(sizeof(*req_list), GFP_ATOMIC);
 		if (!req_list) {
-			ERROR(cdev, "Unable to allocate mem for req_list\n");
+			hidg_err(hidg, "Unable to allocate mem for req_list\n");
 			goto free_req;
 		}
 
@@ -491,7 +522,7 @@ static void hidg_set_report_complete(struct usb_ep *ep, struct usb_request *req)
 		wake_up(&hidg->read_queue);
 		break;
 	default:
-		ERROR(cdev, "Set report failed %d\n", req->status);
+		hidg_err(hidg, "Set report failed %d\n", req->status);
 		fallthrough;
 	case -ECONNABORTED:		/* hardware forced ep reset */
 	case -ECONNRESET:		/* request dequeued */
