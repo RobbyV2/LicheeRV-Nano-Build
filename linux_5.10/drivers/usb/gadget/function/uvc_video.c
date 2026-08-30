@@ -66,7 +66,30 @@
  * whether it is safe is still open, and the way to close it is an hour-long
  * stream on an uncontended board.
  */
-static unsigned int uvcg_idle_depth = 32;
+/*
+ * Off by default, and the reason is worth stating because the numbers above
+ * argue for 32.
+ *
+ * Every measurement above was taken at streaming_maxpacket=768, where a frame
+ * is 34 to 43 payloads and the chain restarts between frames often enough for
+ * the restart to be the dominant loss. Widening the endpoint to 3072 - the
+ * architectural ceiling, 1024 bytes three times a microframe - removes that
+ * mode outright: byte-exact against known sent frames on this board, with the
+ * chain NOT fed, 3072 gives 1/451 damaged (0.2%) at 44 KB frames and 0/450 at
+ * small ones, against 73/450 (16.2%) at 768. So the picture the deep chain was
+ * buying is available without it.
+ *
+ * And the chain is not free. It completes 8000 requests a second at any
+ * non-zero depth, which measured 8252-9298 usb interrupts a second with the
+ * CPU down to 19-32% idle, and under that load this board wedged hard three
+ * times - twice needing the power pulled, once sitting dead because
+ * CONFIG_PANIC_TIMEOUT was 0. A torn frame is recoverable; a board that stops
+ * answering is not.
+ *
+ * The knob stays, because the mechanism is real and a host that cannot take a
+ * 3072 byte microframe may still want it. It just no longer defaults on.
+ */
+static unsigned int uvcg_idle_depth;
 module_param_named(idle_depth, uvcg_idle_depth, uint, 0644);
 MODULE_PARM_DESC(idle_depth,
 		 "empty payloads kept queued on the isoc IN endpoint while idle");
