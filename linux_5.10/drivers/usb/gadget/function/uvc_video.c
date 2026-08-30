@@ -29,17 +29,30 @@
  * has nothing to send. Zero leaves the chain to run out, which is what the
  * driver did before this knob existed.
  *
- * Measured on an SG2002: at 8, so that the chain never runs out, the endpoint
- * stops being restarted almost entirely - BNAs fall from 68.7/s to 0.7/s - but
- * the descriptors carrying video fare far worse, not better. The core services
- * this endpoint on roughly one microframe in four, and a descriptor whose
- * target microframe goes unserviced is destroyed rather than deferred, so a
- * chain stamped for consecutive microframes throws away three payloads in four:
- * 26430 of 28840 payloads lost against 139 of 46008 with the chain left alone.
- * Writable at runtime so the trade can be swept against the hardware rather
- * than argued about.
+ * Measured on an SG2002. The depth is not a dial that trades one cost against
+ * another - it has a cliff in it, and 8 sits on the wrong side. Swept against a
+ * synthetic source that sends known frames, with the target host capturing the
+ * raw stream and every received frame matched byte for byte against the frame
+ * that was sent, 640x480 at 30fps, 34 payloads to the frame:
+ *
+ *	idle_depth=0	 63 of 444 frames damaged  (14.0%)
+ *	idle_depth=8	118 of 516 frames damaged  (22.7%)
+ *	idle_depth=32	  2 of 447 frames damaged   (0.4%)
+ *
+ * and at 43 payloads to the frame, 74 of 447 (16.4%) at zero against 3 of 446
+ * (0.7%) at 32. So a shallow chain is worse than no chain at all: at 8 the
+ * damage is not the one lost payload that zero gives but the whole frame,
+ * ~23 KB holes opening at payload three, because the chain is refilled too
+ * late to keep the endpoint's frame stamping in step and the burst that
+ * follows is stamped into the past. At 32 the chain is deep enough that it is
+ * never behind, and the loss all but disappears.
+ *
+ * Thirty two is also what the request ring holds, so at this depth the
+ * endpoint is simply never idle. Writable at runtime so the trade can be swept
+ * against the hardware rather than argued about; the default is the measured
+ * good value rather than off, because off is the bug.
  */
-static unsigned int uvcg_idle_depth;
+static unsigned int uvcg_idle_depth = 32;
 module_param_named(idle_depth, uvcg_idle_depth, uint, 0644);
 MODULE_PARM_DESC(idle_depth,
 		 "empty payloads kept queued on the isoc IN endpoint while idle");
