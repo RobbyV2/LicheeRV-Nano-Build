@@ -143,11 +143,35 @@ static inline struct device *uvcg_dev(struct usb_function *f)
 #define UVC_MAX_REQUEST_SIZE			64
 #define UVC_MAX_EVENTS				4
 
+/* How many errored completions are kept for the dump at stream stop. The
+ * stats line counts them and says nothing else; the ring says when each
+ * came back, with what code and how many bytes, so a run's handful of
+ * errors can be placed in time and against the endpoint's own counters.
+ */
+#define UVC_ERR_LOG_N				16
+
 /* ------------------------------------------------------------------------
  * Structures
  */
 
 struct uvc_video;
+
+/*
+ * One request that completed with a status other than success or -EXDEV
+ * while the stream was live. Written from the completion handler under
+ * req_lock, read from process context at stream stop.
+ */
+struct uvcg_err_ev {
+	u64 ns;			/* ktime_get_ns() at completion */
+	unsigned int seq;	/* payloads completed before it (req_queued) */
+	unsigned int frame;	/* encoder frame serial it was filled at */
+	unsigned int actual;
+	unsigned int length;
+	int status;
+	int uframe;		/* the bus microframe when it completed */
+	bool idle;
+	bool eof;
+};
 
 /*
  * Per request state, reached from the completion handler through
@@ -238,6 +262,17 @@ struct uvc_video {
 	unsigned int req_short;
 	unsigned int req_zero;
 	unsigned int req_err;
+	/* The errored completions themselves. -ESHUTDOWN and -ECONNRESET are
+	 * the endpoint being disabled or a request dequeued, both teardown,
+	 * so those are only counted and stamped; every other code goes into
+	 * the ring. Under req_lock.
+	 */
+	struct uvcg_err_ev err_log[UVC_ERR_LOG_N];
+	unsigned int err_log_head;
+	unsigned int err_teardown;
+	unsigned int err_teardown_payload;
+	u64 err_teardown_first_ns;
+	u64 err_teardown_last_ns;
 	unsigned int bytes_queued;
 	unsigned int bytes_sent;
 

@@ -10,6 +10,7 @@
 #include <linux/device.h>
 #include <linux/moduleparam.h>
 #include <linux/errno.h>
+#include <linux/ktime.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/video.h>
@@ -423,8 +424,40 @@ static int uvc_video_send_ready(struct uvc_video *video)
 	}
 }
 
+/*
+ * Called from the completion handler under req_lock: one ring write and one
+ * register read for the microframe. Nothing prints here.
+ */
+static void uvc_video_log_err(struct uvc_video *video,
+			      struct usb_request *req,
+			      struct uvcg_request *ctx)
+{
+	struct usb_function *f = &video->uvc->func;
+	struct uvcg_err_ev *ev =
+		&video->err_log[video->err_log_head % UVC_ERR_LOG_N];
+
+	ev->ns = ktime_get_ns();
+	ev->seq = video->req_queued;
+	ev->frame = ctx->frame;
+	ev->actual = req->actual;
+	ev->length = req->length;
+	ev->status = req->status;
+	ev->idle = ctx->idle;
+	ev->eof = ctx->eof;
+	if (f->config && f->config->cdev && f->config->cdev->gadget)
+		ev->uframe = usb_gadget_frame_number(f->config->cdev->gadget);
+	else
+		ev->uframe = -1;
+	video->err_log_head++;
+}
+
 static void uvc_video_report_stats(struct uvc_video *video)
 {
+	u64 now = ktime_get_ns();
+	unsigned int n = min_t(unsigned int, video->err_log_head,
+			       (unsigned int)UVC_ERR_LOG_N);
+	unsigned int i;
+
 	uvcg_info(&video->uvc->func,
 		  "VS stream stats: %u requests, %u short (%u zero), %u missed, %u errored, %u refused, %u frames marked bad, %u dropped, %u marked too late (%u on EOF), %u idle, %u of %u bytes sent\n",
 		  video->req_queued, video->req_short, video->req_zero,
@@ -432,6 +465,46 @@ static void uvc_video_report_stats(struct uvc_video *video)
 		  video->frames_marked, video->frames_dropped,
 		  video->frames_late, video->frames_late_eof, video->req_idle,
 		  video->bytes_sent, video->bytes_queued);
+
+	/* Every request has been dequeued and freed by now, so nothing
+	 * writes the ring while it is read.
+	 */
+	if (video->err_teardown) {
+		u64 first = now - video->err_teardown_first_ns;
+		u64 last = now - video->err_teardown_last_ns;
+
+		uvcg_info(&video->uvc->func,
+			  "VS stream errors: %u logged (last %u shown), %u at teardown (%u with payload, %llu.%03llu s to %llu.%03llu s before stop)\n",
+			  video->err_log_head, n, video->err_teardown,
+			  video->err_teardown_payload,
+			  first / NSEC_PER_SEC,
+			  (first % NSEC_PER_SEC) / NSEC_PER_MSEC,
+			  last / NSEC_PER_SEC,
+			  (last % NSEC_PER_SEC) / NSEC_PER_MSEC);
+	} else {
+		uvcg_info(&video->uvc->func,
+			  "VS stream errors: %u logged (last %u shown), 0 at teardown\n",
+			  video->err_log_head, n);
+	}
+	for (i = video->err_log_head - n; i < video->err_log_head; i++) {
+		struct uvcg_err_ev *ev = &video->err_log[i % UVC_ERR_LOG_N];
+		u64 age = now - ev->ns;
+
+		uvcg_info(&video->uvc->func,
+			  "  err %u: status %d, %u of %u bytes%s%s, req %u, frame %u, uf %d, at %llu.%06llu s (%llu.%03llu s before stop)\n",
+			  i, ev->status, ev->actual, ev->length,
+			  ev->idle ? ", idle" : "", ev->eof ? ", eof" : "",
+			  ev->seq, ev->frame, ev->uframe,
+			  ev->ns / NSEC_PER_SEC,
+			  (ev->ns % NSEC_PER_SEC) / NSEC_PER_USEC,
+			  age / NSEC_PER_SEC,
+			  (age % NSEC_PER_SEC) / NSEC_PER_MSEC);
+	}
+	video->err_log_head = 0;
+	video->err_teardown = 0;
+	video->err_teardown_payload = 0;
+	video->err_teardown_first_ns = 0;
+	video->err_teardown_last_ns = 0;
 }
 
 /*
@@ -492,6 +565,21 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 				if (ctx->eof)
 					video->frames_late_eof++;
 			}
+		}
+	}
+	if (req->status && req->status != -EXDEV) {
+		if (req->status == -ESHUTDOWN || req->status == -ECONNRESET ||
+		    !video->is_enabled) {
+			u64 ns = ktime_get_ns();
+
+			if (!video->err_teardown)
+				video->err_teardown_first_ns = ns;
+			video->err_teardown_last_ns = ns;
+			video->err_teardown++;
+			if (!ctx->idle)
+				video->err_teardown_payload++;
+		} else {
+			uvc_video_log_err(video, req, ctx);
 		}
 	}
 
@@ -824,6 +912,11 @@ int uvcg_video_enable(struct uvc_video *video, int enable)
 	video->req_zero = 0;
 	video->req_missed = 0;
 	video->req_err = 0;
+	video->err_log_head = 0;
+	video->err_teardown = 0;
+	video->err_teardown_payload = 0;
+	video->err_teardown_first_ns = 0;
+	video->err_teardown_last_ns = 0;
 	video->req_refused = 0;
 	video->frame_seq = 0;
 	video->frame_inflight = 0;
