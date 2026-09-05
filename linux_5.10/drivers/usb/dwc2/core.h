@@ -133,7 +133,6 @@ struct dwc2_hsotg_req;
  * @last_load: The offset of data for the last start of request.
  * @size_loaded: The last loaded size for DxEPTSIZE for periodic IN
  * @target_frame: Targeted frame num to setup next ISOC transfer
- * @frame_overrun: Indicates SOF number overrun in DSTS
  *
  * This is the driver's state for each registered endpoint, allowing it
  * to keep track of transactions that need doing. Each endpoint has a
@@ -234,7 +233,6 @@ struct dwc2_hsotg_ep {
 	}			isoc_log[DWC2_ISOC_LOG_N];
 	unsigned int            isoc_log_head;
 #define TARGET_FRAME_INITIAL   0xFFFFFFFF
-	bool			frame_overrun;
 
 	dma_addr_t		desc_list_dma;
 	struct dwc2_dma_desc	*desc_list;

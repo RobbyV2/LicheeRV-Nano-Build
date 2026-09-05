@@ -110,18 +110,14 @@ static inline bool using_desc_dma(struct dwc2_hsotg *hsotg)
  * dwc2_gadget_incr_frame_num - Increments the targeted frame number.
  * @hs_ep: The endpoint
  *
- * This function will also check if the frame number overruns DSTS_SOFFN_LIMIT.
- * If an overrun occurs it will wrap the value and set the frame_overrun flag.
+ * The target wraps at DSTS_SOFFN_LIMIT the way the bus counter in DSTS does.
+ * dwc2_gadget_target_frame_elapsed() compares the two modulo that width, so
+ * no record of the wrap is kept.
  */
 static inline void dwc2_gadget_incr_frame_num(struct dwc2_hsotg_ep *hs_ep)
 {
 	hs_ep->target_frame += hs_ep->interval;
-	if (hs_ep->target_frame > DSTS_SOFFN_LIMIT) {
-		hs_ep->frame_overrun = true;
-		hs_ep->target_frame &= DSTS_SOFFN_LIMIT;
-	} else {
-		hs_ep->frame_overrun = false;
-	}
+	hs_ep->target_frame &= DSTS_SOFFN_LIMIT;
 }
 
 /**
@@ -1386,24 +1382,32 @@ dwc2_hsotg_handle_unaligned_buf_complete(struct dwc2_hsotg *hsotg,
  * dwc2_gadget_target_frame_elapsed - Checks target frame
  * @hs_ep: The driver endpoint to check
  *
- * Returns 1 if targeted frame elapsed. If returned 1 then we need to drop
- * corresponding transfer.
+ * Returns true if the targeted (micro)frame has gone by on the bus, in which
+ * case the corresponding transfer is to be dropped or re-aimed.
+ *
+ * The frame counter in DSTS is 14 bits wide and wraps every 2.048 s at high
+ * speed, so the answer is the distance from target to current taken modulo
+ * that width: a target less than half the range behind the bus has elapsed,
+ * one less than half the range ahead has not. This holds on both sides of the
+ * wrap. A plain compare with a one-shot overrun flag did not: the flag was set
+ * only by the single increment that crossed the limit and cleared by the
+ * next, so a chain stamped 24 deep across the wrap carried targets 1, 2, 3 ...
+ * that read as elapsed against a bus still at 16360, and every enqueue for
+ * the rest of that lap re-aimed the chain onto microframes already queued.
+ * An endpoint still waiting for its first token has no target, and nothing
+ * has elapsed for it.
  */
 static bool dwc2_gadget_target_frame_elapsed(struct dwc2_hsotg_ep *hs_ep)
 {
 	struct dwc2_hsotg *hsotg = hs_ep->parent;
 	u32 target_frame = hs_ep->target_frame;
 	u32 current_frame = hsotg->frame_number;
-	bool frame_overrun = hs_ep->frame_overrun;
 
-	if (!frame_overrun && current_frame >= target_frame)
-		return true;
+	if (target_frame == TARGET_FRAME_INITIAL)
+		return false;
 
-	if (frame_overrun && current_frame >= target_frame &&
-	    ((current_frame - target_frame) < DSTS_SOFFN_LIMIT / 2))
-		return true;
-
-	return false;
+	return ((current_frame - target_frame) & DSTS_SOFFN_LIMIT) <
+	       (DSTS_SOFFN_LIMIT + 1) / 2;
 }
 
 /*
