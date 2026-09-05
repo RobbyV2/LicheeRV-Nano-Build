@@ -109,19 +109,29 @@ static inline struct device *uvcg_dev(struct usb_function *f)
  *
  * This costs buffers only: the endpoint count and the tx FIFO seating are set
  * by maxpacket (768), not by ring depth, and dwc2 gives an isochronous
- * endpoint MAX_DMA_DESC_NUM_HS_ISOC (256) descriptors, so 32 fits with room.
- * At 768 bytes a request this costs 24 KB.
+ * endpoint MAX_DMA_DESC_NUM_HS_ISOC (256) descriptors, so 64 fits with room.
+ *
+ * Sixty four, with 48 of them in flight, is the fallback for a console that
+ * is not quiet. With 24 in flight the chain held 2 ms at its worst moment,
+ * and one kernel-log line written from process context during a 120 s stream
+ * was enough to run it dry once: the console on this board writes with
+ * interrupts off at 87 us a character, so a line of 30 characters covers the
+ * lead. Doubling the pool puts 5 ms between the core and the end of the chain
+ * at the same interrupt rate. The buffers are plain kmalloc from the general
+ * slab, allocated per stream at STREAMON and freed at STREAMOFF, 768 bytes
+ * each at this profile, so the doubling costs about 48 KB more while a stream
+ * is up and nothing from the DMA pools. Revert by putting 32 and 24 back.
  */
-#define UVC_NUM_REQUESTS			32
+#define UVC_NUM_REQUESTS			64
 
 /* How many of those are kept queued at the UDC at all times while an
  * isochronous stream is up. Every completion re-queues one, so the count is a
  * constant and the endpoint's descriptor chain never runs out; the other
- * eight are the pump's working set. Lead at the worst moment, just before a
- * batch of completions is serviced, is 24 minus the stride below: 16
- * descriptors, 2 ms at one microframe each.
+ * sixteen are the pump's working set. Lead at the worst moment, just before
+ * a batch of completions is serviced, is 48 minus the stride below: 40
+ * descriptors, 5 ms at one microframe each.
  */
-#define UVC_ISOC_INFLIGHT			24
+#define UVC_ISOC_INFLIGHT			48
 
 /* One completion interrupt per this many requests, plus one at every end of
  * frame. The bus carries 8000 packets a second either way; this only decides
