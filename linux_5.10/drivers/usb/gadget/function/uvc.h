@@ -113,6 +113,23 @@ static inline struct device *uvcg_dev(struct usb_function *f)
  * At 768 bytes a request this costs 24 KB.
  */
 #define UVC_NUM_REQUESTS			32
+
+/* How many of those are kept queued at the UDC at all times while an
+ * isochronous stream is up. Every completion re-queues one, so the count is a
+ * constant and the endpoint's descriptor chain never runs out; the other
+ * eight are the pump's working set. Lead at the worst moment, just before a
+ * batch of completions is serviced, is 24 minus the stride below: 16
+ * descriptors, 2 ms at one microframe each.
+ */
+#define UVC_ISOC_INFLIGHT			24
+
+/* One completion interrupt per this many requests, plus one at every end of
+ * frame. The bus carries 8000 packets a second either way; this only decides
+ * which of them are heard about. dwc2 retires every finished descriptor on
+ * each interrupt, so nothing is lost by asking less often.
+ */
+#define UVC_ISOC_IOC_STRIDE			8
+
 #define UVC_MAX_REQUEST_SIZE			64
 #define UVC_MAX_EVENTS				4
 
@@ -136,18 +153,16 @@ struct uvc_video;
 struct uvcg_request {
 	struct uvc_video *video;
 	unsigned int frame;
-	/* This request carries no payload at all - it is only there to keep the
+	/* This request carries no payload at all; it is only there to keep the
 	 * endpoint's descriptor chain from running out. It belongs to no frame,
 	 * so its completion must not settle one.
 	 */
 	bool idle;
-	/* This request carries the frame's EOF. Its loss is the one loss that
-	 * can never be reported in time - the frame ends as it is encoded, so
-	 * the serial has already moved on by the time it completes - and with
-	 * the hold on it is also the most exposed payload of the frame, since
-	 * it is the one queued into a chain the hold has just drained. Worth
-	 * counting apart from every other late report, because the two ask for
-	 * different remedies.
+	/* This request carries the frame's EOF. Its completion always asks for
+	 * an interrupt, so the buffer goes back to userspace promptly, and its
+	 * loss is the one loss that can never be reported in time: the frame
+	 * ends as it is encoded, so the serial has already moved on by the time
+	 * it completes. Counted apart from every other late report.
 	 */
 	bool eof;
 };
@@ -157,30 +172,23 @@ struct uvc_video {
 	struct usb_ep *ep;
 
 	struct work_struct pump;
-	/* The pump refills the isochronous endpoint, and every microframe it
-	 * misses is a payload the host never sees. On the shared system
-	 * workqueue it queues behind whatever else this single core is doing,
-	 * so it gets a dedicated high-priority one of its own.
+	/* The pump encodes frames into requests. The endpoint is fed from the
+	 * completion handler and never waits on the pump, but a frame leaves
+	 * the board only when the pump has encoded it, and on the shared
+	 * system workqueue it would queue behind whatever else this single core
+	 * is doing, so it gets a dedicated high-priority one of its own.
 	 */
 	struct workqueue_struct *async_wq;
 
-	/* dwc2 completes an isochronous IN request that missed its microframe
-	 * with status 0 and a short actual, so a lost payload leaves no trace at
-	 * all. Count what was queued against what actually went out, so a run
-	 * that is fixed can be told apart from a run that was lucky.
+	/* Count what was queued against what actually went out, so a run that
+	 * is fixed can be told apart from a run that was lucky.
 	 */
 	/* Serial of the frame the encoder is filling requests from. Every
 	 * request carries the serial it was filled at, so a completion can be
 	 * attributed to the frame that actually lost the payload.
 	 */
 	unsigned int frame_seq;
-	/* Payloads of frame_seq that are queued and have not completed yet.
-	 * The payload that carries EOF waits for this to reach zero, so the
-	 * frame's fate is settled before the last chance to label it is spent.
-	 * It costs no time on the wire: the ring is still full of this frame's
-	 * earlier payloads, so the encoder was only running ahead of a queue
-	 * that had nowhere to put the result.
-	 */
+	/* Payloads of frame_seq that are queued and have not completed yet. */
 	unsigned int frame_inflight;
 	/* Set when a payload of frame_seq did not reach the host, cleared when
 	 * the frame ends.
@@ -193,34 +201,29 @@ struct uvc_video {
 	 */
 	unsigned int frames_dropped;
 	/* Frames whose loss was reported after every payload of theirs had
-	 * already been encoded, so none was left to carry the error bit. With
-	 * the EOF payload held back this should stay at zero; it is here so
-	 * that "the host was told" can be told apart from "the host was not".
+	 * already been encoded, so none was left to carry the error bit. Here
+	 * so that "the host was told" can be told apart from "the host was
+	 * not".
 	 */
 	unsigned int frames_late;
 	/* Of those, the ones where the payload lost was the EOF payload itself.
 	 * Nothing in the driver can ever catch that one in time, so it is the
-	 * floor on frames_late, and the only lever on it is not to lose the
-	 * payload - see eof_slack. Counting it apart is what says whether a
-	 * late report is a hole in the accounting or a hole in the wire.
+	 * floor on frames_late. Counting it apart is what says whether a late
+	 * report is a hole in the accounting or a hole in the wire.
 	 */
 	unsigned int frames_late_eof;
-	/* Zero-length payloads queued to keep the endpoint alive, and how many
-	 * of them are in flight right now. Counted apart from the real ones so
-	 * that the loss rate stays a rate of payloads that carried video.
+	/* Zero-length payloads queued to keep the endpoint alive. Counted apart
+	 * from the real ones so that the loss rate stays a rate of payloads
+	 * that carried video.
 	 */
 	unsigned int req_idle;
-	unsigned int idle_inflight;
-	/* Which keep-alive this is, so that every idle_ioc-th one can be the
-	 * one that asks for a completion interrupt. Only the pump touches it.
+	/* Payloads the UDC retired without sending, reported as -EXDEV. Each
+	 * one is a hole in a frame, and the UDC's own isoc_lost counter should
+	 * say the same number.
 	 */
-	unsigned int idle_seq;
-	/* The stats line is the only window onto the loss rate, and it used to
-	 * be printed once, when the host stopped the stream. Nothing on this
-	 * board can make the host stop on demand, so print it on a timer as
-	 * well and read the rate out of a running session.
-	 */
-	unsigned long stats_next;
+	unsigned int req_missed;
+	/* Requests the UDC refused to queue at all. */
+	unsigned int req_refused;
 	unsigned int req_queued;
 	unsigned int req_short;
 	unsigned int req_zero;
@@ -242,13 +245,25 @@ struct uvc_video {
 	__u8 *req_buffer[UVC_NUM_REQUESTS];
 	struct uvcg_request req_ctx[UVC_NUM_REQUESTS];
 	struct list_head req_free;
+	/* Encoded and waiting for a completion to send it. The pump fills
+	 * requests onto this list once the endpoint holds UVC_ISOC_INFLIGHT;
+	 * the completion handler takes them from here.
+	 */
+	struct list_head req_ready;
+	/* Requests queued at the UDC right now. Under req_lock. */
+	unsigned int inflight;
+	/* Which request this is, so that every UVC_ISOC_IOC_STRIDE-th one can
+	 * be the one that asks for a completion interrupt. Under req_lock.
+	 */
+	unsigned int ioc_seq;
+	/* False before anything is dequeued at stop, so a completion arriving
+	 * during teardown hands its request back rather than re-queueing one
+	 * that is about to be freed. Under req_lock.
+	 */
+	bool is_enabled;
 	spinlock_t req_lock;
 
-	/* Answers -EAGAIN when the request cannot be filled yet, which is how
-	 * the last payload of a frame waits for the frame's earlier payloads
-	 * to retire. The pump returns the request unqueued and comes back on
-	 * the next completion.
-	 */
+	/* Answers -ENODATA when the frame was dropped rather than encoded. */
 	int (*encode) (struct usb_request *req, struct uvc_video *video,
 			struct uvc_buffer *buf);
 

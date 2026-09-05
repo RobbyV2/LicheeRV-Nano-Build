@@ -280,7 +280,11 @@ uvc_function_set_alt(struct usb_function *f, unsigned interface, unsigned alt)
 	struct uvc_event *uvc_event = (void *)&v4l2_event.u.data;
 	int ret;
 
-	uvcg_info(f, "%s(%u, %u)\n", __func__, interface, alt);
+	/* Composite runs this from the UDC's interrupt handler, where a
+	 * console line is written with interrupts off and the video endpoint
+	 * loses its lead for the duration. Debug, not info.
+	 */
+	uvcg_dbg(f, "%s(%u, %u)\n", __func__, interface, alt);
 
 	if (interface == uvc->control_intf) {
 		if (alt)
@@ -322,6 +326,13 @@ uvc_function_set_alt(struct usb_function *f, unsigned interface, unsigned alt)
 		if (uvc->state != UVC_STATE_STREAMING)
 			return 0;
 
+		/* The endpoint goes down before STREAMOFF is raised, and
+		 * that order has to stay. Disabling it stops the DMA chain
+		 * and gives every queued request back; only then does the
+		 * application's STREAMOFF free the buffers those requests
+		 * point at. The other way round the core could still be
+		 * reading memory the function no longer owns.
+		 */
 		if (uvc->video.ep)
 			usb_ep_disable(uvc->video.ep);
 
@@ -339,7 +350,7 @@ uvc_function_set_alt(struct usb_function *f, unsigned interface, unsigned alt)
 		if (!uvc->video.ep)
 			return -EINVAL;
 
-		uvcg_info(f, "reset UVC\n");
+		uvcg_dbg(f, "reset UVC\n");
 		usb_ep_disable(uvc->video.ep);
 
 		ret = config_ep_by_speed(f->config->cdev->gadget,
