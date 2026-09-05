@@ -173,7 +173,6 @@
         /delete-property/ mute-gpio-r;
 };
 
-#if (CVIMMAP_FRAMEBUFFER_SIZE > 0)
 &fb_reserved {
         status = "okay";
 };
@@ -181,7 +180,6 @@
 &cvi_fb {
         status = "okay";
 };
-#endif
 
 &mipi_rx {
         snsr-reset = <&porte 1 GPIO_ACTIVE_LOW>;
