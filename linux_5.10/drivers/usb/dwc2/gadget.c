@@ -2435,6 +2435,38 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 }
 
 /*
+ * dwc2_gadget_retire_isoc_chain - forget a descriptor chain the core has left
+ * @hs_ep: The isochronous endpoint.
+ *
+ * Retire the chain along with the indices into it. Resetting the indices
+ * without it leaves every descriptor holding the DMA-done status from the
+ * previous lap, and a completion interrupt arriving before
+ * dwc2_gadget_start_isoc_ddma() rebuilds the chain walks them from zero and
+ * gives the function requests whose buffers still hold what they carried
+ * req_number service intervals ago. On a UAC2 sink that is an exact repeat of
+ * the target host's audio from req_number milliseconds earlier: measured with
+ * req_number 4, one 1 ms block in every 5.6 was byte identical to the block 4
+ * before it, and the distance followed req_number when it was changed. This
+ * marks them host-busy exactly as the rebuild's own first loop does, and
+ * returns target_frame to its initial value so the next token starts a fresh
+ * chain from whatever is queued by then. Called with the controller stopped
+ * on this endpoint, or after the core has stopped itself.
+ */
+static void dwc2_gadget_retire_isoc_chain(struct dwc2_hsotg_ep *hs_ep)
+{
+	int i;
+
+	for (i = 0; i < MAX_DMA_DESC_NUM_HS_ISOC; i++)
+		hs_ep->desc_list[i].status = DEV_DMA_BUFF_STS_HBUSY
+					     << DEV_DMA_BUFF_STS_SHIFT;
+
+	hs_ep->target_frame = TARGET_FRAME_INITIAL;
+	hs_ep->next_desc = 0;
+	hs_ep->compl_desc = 0;
+	hs_ep->noioc_run = 0;
+}
+
+/*
  * dwc2_gadget_handle_isoc_bna - handle BNA interrupt for ISOC.
  * @hs_ep: The isochronous endpoint.
  *
@@ -2446,7 +2478,6 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 static void dwc2_gadget_handle_isoc_bna(struct dwc2_hsotg_ep *hs_ep)
 {
 	struct dwc2_hsotg *hsotg = hs_ep->parent;
-	int i;
 
 	hs_ep->isoc_bna++;
 	if (!hs_ep->dir_in)
@@ -2493,27 +2524,7 @@ static void dwc2_gadget_handle_isoc_bna(struct dwc2_hsotg_ep *hs_ep)
 	else if (!list_empty(&hs_ep->queue))
 		hs_ep->isoc_bna_kept++;
 
-	/*
-	 * Retire the chain along with the indices into it. Resetting the
-	 * indices without it leaves every descriptor holding the DMA-done
-	 * status from the previous lap, and a completion interrupt arriving
-	 * before dwc2_gadget_start_isoc_ddma() rebuilds the chain walks them
-	 * from zero and gives the function requests whose buffers still hold
-	 * what they carried req_number service intervals ago. On a UAC2 sink
-	 * that is an exact repeat of the target host's audio from req_number
-	 * milliseconds earlier: measured with req_number 4, one 1 ms block in
-	 * every 5.6 was byte identical to the block 4 before it, and the
-	 * distance followed req_number when it was changed. This marks them
-	 * host-busy exactly as the rebuild's own first loop does.
-	 */
-	for (i = 0; i < MAX_DMA_DESC_NUM_HS_ISOC; i++)
-		hs_ep->desc_list[i].status = DEV_DMA_BUFF_STS_HBUSY
-					     << DEV_DMA_BUFF_STS_SHIFT;
-
-	hs_ep->target_frame = TARGET_FRAME_INITIAL;
-	hs_ep->next_desc = 0;
-	hs_ep->compl_desc = 0;
-	hs_ep->noioc_run = 0;
+	dwc2_gadget_retire_isoc_chain(hs_ep);
 }
 
 /**
@@ -4624,6 +4635,34 @@ static int dwc2_hsotg_ep_dequeue(struct usb_ep *ep, struct usb_request *req)
 		dwc2_hsotg_ep_stop_xfr(hs, hs_ep);
 
 	dwc2_hsotg_complete_request(hs, hs_ep, hs_req, -ECONNRESET);
+
+	/*
+	 * A descriptor-DMA isochronous IN endpoint never sets hs_ep->req, so
+	 * the stop above is never reached for it: the request has left the
+	 * queue, but the descriptor filled for it still points at its buffer
+	 * and the core keeps walking the chain. A function that dequeues every
+	 * request and then frees the buffers, as the UVC gadget does when its
+	 * video node is closed while the host is still polling, leaves the
+	 * core reading freed memory onto the bus until it runs off the end of
+	 * the chain and the BNA handler retires it, up to 3 ms later. Once the
+	 * last request is gone the chain has nothing left to send, so stop the
+	 * endpoint the way ep_disable does when it finds one running, and
+	 * retire the descriptors the way the BNA handler does. The next
+	 * request queued waits for a token and starts a fresh chain, exactly
+	 * as after a BNA. An endpoint already disabled, by alt 0 or a
+	 * disconnect, has had its queue emptied by kill_all_requests() and
+	 * never gets here; one that never started has no chain running and is
+	 * only tidied.
+	 */
+	if (using_desc_dma(hs) && hs_ep->isochronous && hs_ep->dir_in &&
+	    list_empty(&hs_ep->queue)) {
+		if (dwc2_readl(hs, DIEPCTL(hs_ep->index)) & DXEPCTL_EPENA) {
+			hs_ep->isoc_dq_stops++;
+			dwc2_hsotg_ep_stop_xfr(hs, hs_ep);
+		}
+		dwc2_gadget_retire_isoc_chain(hs_ep);
+	}
+
 	spin_unlock_irqrestore(&hs->lock, flags);
 
 	return 0;

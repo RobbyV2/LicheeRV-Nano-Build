@@ -204,6 +204,11 @@ struct dwc2_hsotg_ep {
 	 */
 	unsigned int            isoc_lost;
 	unsigned int            isoc_epdis;
+	/* Chains stopped by a dequeue that emptied the queue while the core
+	 * was still running them. The UVC gadget's video node closing under
+	 * a polling host is the known way here.
+	 */
+	unsigned int            isoc_dq_stops;
 	unsigned int            isoc_incompl;
 	unsigned int            isoc_bna;
 	unsigned int            isoc_bna_kept;
