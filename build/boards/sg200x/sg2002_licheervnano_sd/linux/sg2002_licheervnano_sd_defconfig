@@ -566,6 +566,15 @@ CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=y
 # forever by design, and it reported every one of them 120 seconds into the
 # first boot that had it.
 # CONFIG_DETECT_HUNG_TASK is not set
+# And somewhere for that stack to go. The board has no serial console attached
+# and no pstore, so the two lockups that the detector above turned into reboots
+# left nothing behind but the reboot. netconsole sends the log over UDP to a
+# listener on the LAN, from the interrupt handler if it has to, so a lockup
+# trace or a panic reaches the listener before the panic timeout takes the
+# board down. Dynamic, so the target is set at boot from configfs by
+# S94kvmsafety rather than baked into the command line.
+CONFIG_NETCONSOLE=y
+CONFIG_NETCONSOLE_DYNAMIC=y
 CONFIG_INPUT_MISC=y
 CONFIG_INPUT_UINPUT=y
 # CONFIG_MAGIC_SYSRQ_SERIAL is not set
