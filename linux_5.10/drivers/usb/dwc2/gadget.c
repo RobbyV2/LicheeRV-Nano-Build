@@ -1523,11 +1523,23 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 	if (using_desc_dma(hs) && hs_ep->isochronous) {
 		if (hs_ep->dir_in) {
 			hs_ep->isoc_enq++;
-			if (hs_ep->target_frame == TARGET_FRAME_INITIAL)
+			/* A request that arrives while the chain waits for
+			 * its start sits in the queue until the host's next
+			 * token, and that token only starts the chain if the
+			 * endpoint is disabled when it lands. An endpoint
+			 * found enabled here is running a chain software has
+			 * already given up on, so the request waits for a
+			 * start that cannot come. That is the one moment the
+			 * register is worth reading; while the chain runs it
+			 * is not read at all, because an AHB read on every
+			 * one of 8000 enqueues a second was measurable.
+			 */
+			if (hs_ep->target_frame == TARGET_FRAME_INITIAL) {
 				hs_ep->isoc_enq_idle++;
-			else if (!(dwc2_readl(hs, DIEPCTL(hs_ep->index)) &
-				   DXEPCTL_EPENA))
-				hs_ep->isoc_enq_dead++;
+				if (dwc2_readl(hs, DIEPCTL(hs_ep->index)) &
+				    DXEPCTL_EPENA)
+					hs_ep->isoc_enq_dead++;
+			}
 		}
 		if (hs_ep->target_frame != TARGET_FRAME_INITIAL) {
 			dma_addr_t dma_addr = hs_req->req.dma;
@@ -2291,6 +2303,7 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 	struct usb_request *ureq;
 	u32 desc_sts;
 	u32 mask;
+	int result;
 
 	desc_sts = hs_ep->desc_list[hs_ep->compl_desc].status;
 
@@ -2298,6 +2311,7 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 	while ((desc_sts & DEV_DMA_BUFF_STS_MASK) >>
 		DEV_DMA_BUFF_STS_SHIFT == DEV_DMA_BUFF_STS_DMADONE) {
 
+		result = 0;
 		hs_req = get_ep_head(hs_ep);
 		if (!hs_req) {
 			/* Not worth a warning: the BNA handler sweeps here
@@ -2385,8 +2399,6 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 			 */
 			ureq->actual = 0;
 			hs_ep->isoc_flushed++;
-			if (hs_ep->dir_in && ureq->length)
-				hs_ep->isoc_lost++;
 			dev_dbg(hsotg->dev,
 				"%s: ep%d isoc desc not sent, sts %d\n",
 				__func__, hs_ep->index,
@@ -2394,8 +2406,26 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 				DEV_DMA_STS_SHIFT);
 		}
 
+		/*
+		 * An IN descriptor that carried bytes and moved none was
+		 * retired unsent, whether its microframe had gone by when
+		 * the core reached it or the chain was flushed under it.
+		 * The bus saw nothing, and a status of 0 would tell the
+		 * function the packet went out. -EXDEV is what the USB
+		 * stack reports for a missed isochronous interval and what
+		 * the function drivers already expect from other UDCs, so
+		 * the function side stays portable. An empty descriptor
+		 * retired the same way lost nothing and stays a success.
+		 * Counted here rather than per status word so that the
+		 * common case, success with nothing moved, is not missed.
+		 */
+		if (hs_ep->dir_in && ureq->length && ureq->actual == 0) {
+			hs_ep->isoc_lost++;
+			result = -EXDEV;
+		}
+
 		hs_ep->isoc_cpl_in++;
-		dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, 0);
+		dwc2_hsotg_complete_request(hsotg, hs_ep, hs_req, result);
 
 		hs_ep->compl_desc++;
 		if (hs_ep->compl_desc > (MAX_DMA_DESC_NUM_HS_ISOC - 1))
