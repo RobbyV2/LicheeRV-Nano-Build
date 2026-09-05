@@ -362,21 +362,24 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
 	ssize_t status = -ENOMEM;
 
 	/*
-	 * remote wakeup is allowed only when the corresponding bit
-	 * in config descriptor is set and wakeup_on_write is enabled.
-     * FIXME: cdev->config can be NULLed on disconnect.
+	 * Remote wakeup is a signal a suspended device sends to wake the
+	 * bus, and nothing else. A real HID device raises it when a key is
+	 * pressed while the host sleeps, and never otherwise. Raising it on
+	 * every report while the bus is awake wakes nothing and costs one
+	 * "signalling skipped: is not allowed by host" line per keystroke:
+	 * the descriptor advertising the capability is not the host granting
+	 * it, and this host never sends SET_FEATURE(REMOTE_WAKEUP), so the
+	 * earlier guard on bmAttributes let every one of those lines through.
+	 * Signal only while the composite device is suspended.
+	 *
+	 * cdev->config can be NULLed on disconnect, so every pointer on the
+	 * way is checked.
 	 */
 	if (hidg->wakeup_on_write) {
 		struct usb_configuration *config = hidg->func.config;
 
-		/*
-		 * Remote wakeup is legal only once the host has set the
-		 * capability in the configuration it selected. Signalling it
-		 * regardless earns one "signalling skipped: is not allowed by
-		 * host" per keystroke and wakes nothing, and the log line that
-		 * went with it flooded the ring buffer at HID rates.
-		 */
 		if (config && config->cdev && config->cdev->gadget &&
+		    config->cdev->suspended &&
 		    (config->bmAttributes & USB_CONFIG_ATT_WAKEUP))
 			usb_gadget_wakeup(config->cdev->gadget);
 	}
