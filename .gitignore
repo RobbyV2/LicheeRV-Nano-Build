@@ -4,6 +4,7 @@
 *.ko
 *.d
 # keep init.d directory
+!init.d
 !kvm/init.d/*
 !buildroot/board/cvitek/SG200X/overlay/etc/init.d/
 !buildroot/board/cvitek/SG200X/overlay/etc/init.d/*
@@ -423,3 +424,4 @@ middleware/v2/sample/vio/sample_vio_main.o
 osdrv/extdrv/wireless/.tmp_4261/
 middleware/v2/lib
 host-tools/
+.vscode*
