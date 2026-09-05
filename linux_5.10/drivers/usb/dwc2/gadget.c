@@ -2353,6 +2353,7 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 	struct dwc2_hsotg *hsotg = hs_ep->parent;
 	struct dwc2_hsotg_req *hs_req;
 	struct usb_request *ureq;
+	struct dwc2_isoc_ev *ev;
 	u32 desc_sts;
 	u32 mask;
 	int result;
@@ -2387,33 +2388,10 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 				DEV_DMA_ISOC_NBYTES_SHIFT);
 
 			if (hs_ep->dir_in && ureq->actual < ureq->length) {
-				struct dwc2_isoc_ev *ev;
-
 				if (ureq->actual == 0)
 					hs_ep->isoc_zero++;
 				else
 					hs_ep->isoc_partial++;
-				/* An interrupt handler cannot afford to print
-				 * one line per lost payload, and a rate
-				 * limiter throws away exactly the records
-				 * that would show a pattern. Keep the raw
-				 * descriptor in a ring instead - its status,
-				 * the microframe it was aimed at, where it
-				 * sat in the chain and whether the endpoint
-				 * was still enabled - and read it out of
-				 * debugfs afterwards.
-				 */
-				ev = &hs_ep->isoc_log[hs_ep->isoc_log_head %
-						      DWC2_ISOC_LOG_N];
-				ev->sts = desc_sts;
-				ev->tframe = hs_ep->target_frame;
-				ev->now = dwc2_hsotg_read_frameno(hsotg);
-				ev->cdesc = hs_ep->compl_desc;
-				ev->ndesc = hs_ep->next_desc;
-				ev->len = ureq->length;
-				ev->epctl = dwc2_readl(hsotg,
-						       DIEPCTL(hs_ep->index));
-				hs_ep->isoc_log_head++;
 			}
 
 			/*
@@ -2474,6 +2452,35 @@ static void dwc2_gadget_complete_isoc_request_ddma(struct dwc2_hsotg_ep *hs_ep)
 		if (hs_ep->dir_in && ureq->length && ureq->actual == 0) {
 			hs_ep->isoc_lost++;
 			result = -EXDEV;
+		}
+
+		/*
+		 * Every IN descriptor that did not go out whole goes into the
+		 * ring, whatever its status word: a flushed one comes back
+		 * with a status other than success and no bytes, a sent one
+		 * with bytes missing comes back as a success, and both are
+		 * losses. An interrupt handler cannot afford to print one
+		 * line per lost payload, and a rate limiter throws away
+		 * exactly the records that would show a pattern, so the ring
+		 * keeps the raw descriptor status, the microframe it was aimed
+		 * at against the one the bus is on, where it sat in the chain
+		 * and whether the endpoint was still enabled, and debugfs
+		 * prints the last DWC2_ISOC_LOG_N of them afterwards. A storm
+		 * of flushes therefore leaves its last entries readable.
+		 */
+		if (hs_ep->dir_in &&
+		    ((desc_sts & DEV_DMA_STS_MASK) >> DEV_DMA_STS_SHIFT !=
+		     DEV_DMA_STS_SUCC || ureq->actual < ureq->length)) {
+			ev = &hs_ep->isoc_log[hs_ep->isoc_log_head %
+					      DWC2_ISOC_LOG_N];
+			ev->sts = desc_sts;
+			ev->tframe = hs_ep->target_frame;
+			ev->now = dwc2_hsotg_read_frameno(hsotg);
+			ev->cdesc = hs_ep->compl_desc;
+			ev->ndesc = hs_ep->next_desc;
+			ev->len = ureq->length;
+			ev->epctl = dwc2_readl(hsotg, DIEPCTL(hs_ep->index));
+			hs_ep->isoc_log_head++;
 		}
 
 		hs_ep->isoc_cpl_in++;
