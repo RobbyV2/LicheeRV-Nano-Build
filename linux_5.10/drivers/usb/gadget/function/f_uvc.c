@@ -290,7 +290,7 @@ uvc_function_set_alt(struct usb_function *f, unsigned interface, unsigned alt)
 		if (alt)
 			return -EINVAL;
 
-		uvcg_info(f, "reset UVC Control\n");
+		uvcg_dbg(f, "reset UVC Control\n");
 		if (uvc->control_ep) {
 			usb_ep_disable(uvc->control_ep);
 
@@ -375,7 +375,7 @@ uvc_function_disable(struct usb_function *f)
 	struct uvc_device *uvc = to_uvc(f);
 	struct v4l2_event v4l2_event;
 
-	uvcg_info(f, "%s()\n", __func__);
+	uvcg_dbg(f, "%s()\n", __func__);
 
 	memset(&v4l2_event, 0, sizeof(v4l2_event));
 	v4l2_event.type = UVC_EVENT_DISCONNECT;
