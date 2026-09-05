@@ -1018,10 +1018,19 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
  * endpoint is polled once a millisecond and has nothing to send almost every
  * time, so a bit set at ep_enable and never cleared cost 1000 interrupts a
  * second from the first stream start until the next USB reset, streaming or
- * not. Set the bit while some enabled isochronous IN endpoint still has no
- * target frame, clear it otherwise. Called under the controller lock from the
- * chain start, the chain retirement and ep_disable. The non-descriptor-DMA
- * path counts frames off every NAK and keeps the bit set as before.
+ * not. An endpoint with no target frame and nothing queued is no better off
+ * for hearing the token either: dwc2_gadget_handle_nak() finds the queue
+ * empty and leaves the target where it was, so every empty microframe
+ * interrupts for nothing. The UVC function enables its endpoint at the
+ * host's alt 1 and queues its first request only when the application starts
+ * the stream, about 3 s later on this board, and that gap cost 24500
+ * interrupts per stream start. Set the bit while some enabled isochronous IN
+ * endpoint still has no target frame and has at least one request queued,
+ * clear it otherwise. Called under the controller lock from the enqueue that
+ * gives a waiting endpoint its first request, the chain start, the chain
+ * retirement and ep_disable. ep_enable does not arm it. The
+ * non-descriptor-DMA path counts frames off every NAK and keeps the bit set
+ * from ep_enable as before.
  */
 static void dwc2_gadget_update_nak_mask(struct dwc2_hsotg *hsotg)
 {
@@ -1039,7 +1048,8 @@ static void dwc2_gadget_update_nak_mask(struct dwc2_hsotg *hsotg)
 		hs_ep = hsotg->eps_in[idx];
 		if (!(daintmsk & BIT(idx)) || !hs_ep || !hs_ep->isochronous)
 			continue;
-		if (hs_ep->target_frame == TARGET_FRAME_INITIAL) {
+		if (hs_ep->target_frame == TARGET_FRAME_INITIAL &&
+		    !list_empty(&hs_ep->queue)) {
 			waiting = true;
 			break;
 		}
@@ -1591,6 +1601,25 @@ static int dwc2_hsotg_ep_queue(struct usb_ep *ep, struct usb_request *req,
 				if (dwc2_readl(hs, DIEPCTL(hs_ep->index)) &
 				    DXEPCTL_EPENA)
 					hs_ep->isoc_enq_dead++;
+				/*
+				 * The first request on a waiting endpoint is
+				 * what makes the next token worth hearing
+				 * about; until now the NAK interrupt was left
+				 * masked so that the empty microframes between
+				 * ep_enable and this point cost nothing. Tokens
+				 * that arrived in that time left a NAK latched
+				 * in the endpoint's interrupt status with the
+				 * mask off, and arming the mask over it would
+				 * start the chain from here rather than from a
+				 * token, so drop it first, exactly as the chain
+				 * retirement does. The host's next token, at
+				 * most one microframe away, sets it again.
+				 */
+				if (first) {
+					dwc2_writel(hs, DXEPINT_NAKINTRPT,
+						    DIEPINT(hs_ep->index));
+					dwc2_gadget_update_nak_mask(hs);
+				}
 			}
 		}
 		if (hs_ep->target_frame != TARGET_FRAME_INITIAL) {
@@ -2526,11 +2555,13 @@ static void dwc2_gadget_retire_isoc_chain(struct dwc2_hsotg_ep *hs_ep)
 
 	/*
 	 * The next token is what starts the new chain, so the NAK interrupt
-	 * is wanted again. A NAK that latched while the chain ran, on a
-	 * microframe the core had no descriptor for, is still pending in
-	 * DIEPINT with nobody having cleared it, and arming the mask over it
-	 * would start the chain from here rather than from a token. Drop it
-	 * first; the token that follows sets it again.
+	 * is wanted again if anything is left queued to build one from; a
+	 * queue emptied by a dequeue leaves it masked until the next enqueue
+	 * arms it. A NAK that latched while the chain ran, on a microframe
+	 * the core had no descriptor for, is still pending in DIEPINT with
+	 * nobody having cleared it, and arming the mask over it would start
+	 * the chain from here rather than from a token. Drop it first; the
+	 * token that follows sets it again.
 	 */
 	if (hs_ep->dir_in) {
 		dwc2_writel(hs_ep->parent, DXEPINT_NAKINTRPT,
@@ -4476,9 +4507,19 @@ static int dwc2_hsotg_ep_enable(struct usb_ep *ep,
 		hs_ep->compl_desc = 0;
 		if (dir_in) {
 			hs_ep->periodic = 1;
-			mask = dwc2_readl(hsotg, DIEPMSK);
-			mask |= DIEPMSK_NAKMSK;
-			dwc2_writel(hsotg, mask, DIEPMSK);
+			/*
+			 * In descriptor-DMA mode the NAK interrupt is armed
+			 * by dwc2_gadget_update_nak_mask() once the endpoint
+			 * has a request to start a chain with; an endpoint
+			 * that is enabled and empty has no use for it. The
+			 * other path counts frames off every NAK and needs
+			 * the bit from here on.
+			 */
+			if (!using_desc_dma(hsotg)) {
+				mask = dwc2_readl(hsotg, DIEPMSK);
+				mask |= DIEPMSK_NAKMSK;
+				dwc2_writel(hsotg, mask, DIEPMSK);
+			}
 		} else {
 			mask = dwc2_readl(hsotg, DOEPMSK);
 			mask |= DOEPMSK_OUTTKNEPDISMSK;
