@@ -1006,6 +1006,54 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
 }
 
 /*
+ * dwc2_gadget_update_nak_mask - unmask the NAK interrupt only while it is used
+ * @hsotg: The device state.
+ *
+ * DIEPMSK is one register for every IN endpoint. Its NAK bit is how a
+ * descriptor-DMA isochronous IN endpoint learns of its first token: the token
+ * finds the endpoint disabled, the core answers with a zero-length packet and
+ * raises NAK, and dwc2_gadget_handle_nak() reads the bus frame off that and
+ * starts the chain. That is the only use the driver has for the bit, and while
+ * it is set every NAK on any IN endpoint interrupts. The HID keyboard's
+ * endpoint is polled once a millisecond and has nothing to send almost every
+ * time, so a bit set at ep_enable and never cleared cost 1000 interrupts a
+ * second from the first stream start until the next USB reset, streaming or
+ * not. Set the bit while some enabled isochronous IN endpoint still has no
+ * target frame, clear it otherwise. Called under the controller lock from the
+ * chain start, the chain retirement and ep_disable. The non-descriptor-DMA
+ * path counts frames off every NAK and keeps the bit set as before.
+ */
+static void dwc2_gadget_update_nak_mask(struct dwc2_hsotg *hsotg)
+{
+	struct dwc2_hsotg_ep *hs_ep;
+	bool waiting = false;
+	u32 daintmsk;
+	u32 mask;
+	int idx;
+
+	if (!using_desc_dma(hsotg))
+		return;
+
+	daintmsk = dwc2_readl(hsotg, DAINTMSK);
+	for (idx = 1; idx < hsotg->num_of_eps; idx++) {
+		hs_ep = hsotg->eps_in[idx];
+		if (!(daintmsk & BIT(idx)) || !hs_ep || !hs_ep->isochronous)
+			continue;
+		if (hs_ep->target_frame == TARGET_FRAME_INITIAL) {
+			waiting = true;
+			break;
+		}
+	}
+
+	mask = dwc2_readl(hsotg, DIEPMSK);
+	if (waiting)
+		mask |= DIEPMSK_NAKMSK;
+	else
+		mask &= ~DIEPMSK_NAKMSK;
+	dwc2_writel(hsotg, mask, DIEPMSK);
+}
+
+/*
  * dwc2_gadget_start_isoc_ddma - start isochronous transfer in DDMA
  * @hs_ep: The isochronous endpoint.
  *
@@ -2468,6 +2516,20 @@ static void dwc2_gadget_retire_isoc_chain(struct dwc2_hsotg_ep *hs_ep)
 	hs_ep->next_desc = 0;
 	hs_ep->compl_desc = 0;
 	hs_ep->noioc_run = 0;
+
+	/*
+	 * The next token is what starts the new chain, so the NAK interrupt
+	 * is wanted again. A NAK that latched while the chain ran, on a
+	 * microframe the core had no descriptor for, is still pending in
+	 * DIEPINT with nobody having cleared it, and arming the mask over it
+	 * would start the chain from here rather than from a token. Drop it
+	 * first; the token that follows sets it again.
+	 */
+	if (hs_ep->dir_in) {
+		dwc2_writel(hs_ep->parent, DXEPINT_NAKINTRPT,
+			    DIEPINT(hs_ep->index));
+		dwc2_gadget_update_nak_mask(hs_ep->parent);
+	}
 }
 
 /*
@@ -3292,6 +3354,15 @@ static void dwc2_gadget_handle_nak(struct dwc2_hsotg_ep *hs_ep)
 			}
 
 			dwc2_gadget_start_isoc_ddma(hs_ep);
+			/*
+			 * The chain is running, or the queue was empty and
+			 * target_frame is back to its initial value; either
+			 * way the mask now follows the endpoints' state. A NAK
+			 * that was already pending when the mask went off is
+			 * still delivered once and lands above with a target
+			 * set, where it is nothing to act on.
+			 */
+			dwc2_gadget_update_nak_mask(hsotg);
 			return;
 		}
 
@@ -4572,6 +4643,10 @@ static int dwc2_hsotg_ep_disable(struct usb_ep *ep)
 
 	/* disable endpoint interrupts */
 	dwc2_hsotg_ctrl_epint(hsotg, hs_ep->index, hs_ep->dir_in, 0);
+
+	/* One endpoint fewer that can be waiting for a token. */
+	if (hs_ep->isochronous && dir_in)
+		dwc2_gadget_update_nak_mask(hsotg);
 
 	/* terminate all requests with shutdown */
 	kill_all_requests(hsotg, hs_ep, -ESHUTDOWN);
