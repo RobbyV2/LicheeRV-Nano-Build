@@ -348,11 +348,20 @@ static void uvc_video_arm(struct uvc_video *video, struct usb_request *req)
  * Takes back a request the endpoint refused. A refused payload is a hole in
  * its frame, and the frame is marked so the encoder ends it rather than sends
  * the rest around the hole.
+ *
+ * Returns true when encoded payloads are still waiting on req_ready. A
+ * refusal in the completion handler is the one event that can leave them
+ * there with no completion to come: if the endpoint had drained to this last
+ * request, nothing else will ever take the head of req_ready. The caller in
+ * that position wakes the pump, which sends from the head. The pump itself
+ * does not re-arm on its own refusal, so a bus that keeps refusing (suspended,
+ * for instance) costs one attempt per wake and never a loop.
  */
-static void uvc_video_unsend(struct uvc_video *video, struct usb_request *req)
+static bool uvc_video_unsend(struct uvc_video *video, struct usb_request *req)
 {
 	struct uvcg_request *ctx = req->context;
 	unsigned long flags;
+	bool waiting;
 
 	spin_lock_irqsave(&video->req_lock, flags);
 	if (video->inflight)
@@ -364,7 +373,54 @@ static void uvc_video_unsend(struct uvc_video *video, struct usb_request *req)
 		video->frame_bad = 1;
 	}
 	list_add_tail(&req->list, &video->req_free);
+	waiting = video->is_enabled && !list_empty(&video->req_ready);
 	spin_unlock_irqrestore(&video->req_lock, flags);
+
+	return waiting;
+}
+
+/*
+ * Sends encoded payloads from the head of req_ready while the endpoint holds
+ * fewer than UVC_ISOC_INFLIGHT requests. The pump appends what it has just
+ * encoded to the tail and calls this, so payloads leave in the order they
+ * were encoded: one left waiting by a refused re-queue, or by a completion
+ * that found the endpoint full, is never overtaken by a newer payload from
+ * the middle of the next frame. Called with no lock held. Returns the
+ * endpoint's refusal, if it refused, with the refused request already taken
+ * back; the rest of req_ready is left where it is for the next wake.
+ */
+static int uvc_video_send_ready(struct uvc_video *video)
+{
+	struct usb_request *req;
+	unsigned long flags;
+	int ret;
+
+	while (1) {
+		spin_lock_irqsave(&video->req_lock, flags);
+		if (!video->is_enabled || list_empty(&video->req_ready) ||
+		    video->inflight >= UVC_ISOC_INFLIGHT) {
+			spin_unlock_irqrestore(&video->req_lock, flags);
+			return 0;
+		}
+		req = list_first_entry(&video->req_ready, struct usb_request,
+				       list);
+		list_del(&req->list);
+		uvc_video_arm(video, req);
+		spin_unlock_irqrestore(&video->req_lock, flags);
+
+		/* Queued with no lock held, so the UDC's lock nests inside
+		 * nothing of ours. A disabled endpoint is not offered the
+		 * request: the UDC core would refuse it with a stack trace.
+		 */
+		if (!video->ep->enabled)
+			ret = -ESHUTDOWN;
+		else
+			ret = uvcg_video_ep_queue(video, req);
+		if (ret < 0) {
+			uvc_video_unsend(video, req);
+			return ret;
+		}
+	}
 }
 
 static void uvc_video_report_stats(struct uvc_video *video)
@@ -483,8 +539,9 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 		uvcg_queue_cancel(queue, 0);
 	}
 
-	if (next && uvcg_video_ep_queue(video, next) < 0)
-		uvc_video_unsend(video, next);
+	if (next && uvcg_video_ep_queue(video, next) < 0 &&
+	    uvc_video_unsend(video, next))
+		wake = true;
 
 	if (wake)
 		queue_work(video->async_wq, &video->pump);
@@ -596,13 +653,15 @@ error:
 /*
  * uvcg_video_pump - Pump video data into the USB requests
  *
- * Fills free requests with video data from the queued buffers. A filled
- * request goes to the endpoint at once while fewer than UVC_ISOC_INFLIGHT are
- * queued there, which is only the case before the host's first token; after
- * that the endpoint is full and the request waits on req_ready for the next
- * completion to send it. The pump is never on the endpoint's critical path: it
- * only encodes, and its latency decides when a frame leaves, never whether the
- * endpoint has a packet to send.
+ * Fills free requests with video data from the queued buffers. Every filled
+ * request joins the tail of req_ready, and the head of req_ready goes to the
+ * endpoint while fewer than UVC_ISOC_INFLIGHT are queued there, which is only
+ * the case before the host's first token or after a refusal has let the
+ * endpoint drain; otherwise the request waits for the next completion to send
+ * it. Sending from the head keeps payloads in the order they were encoded.
+ * The pump is never on the endpoint's critical path: it only encodes, and its
+ * latency decides when a frame leaves, never whether the endpoint has a packet
+ * to send.
  */
 static void uvcg_video_pump(struct work_struct *work)
 {
@@ -612,8 +671,15 @@ static void uvcg_video_pump(struct work_struct *work)
 	struct usb_request *req;
 	struct uvc_buffer *buf;
 	unsigned long flags;
-	bool direct;
 	int ret;
+
+	/* Payloads left waiting by a refused re-queue go first, before
+	 * anything new is encoded behind them.
+	 */
+	if (uvc_video_send_ready(video) < 0) {
+		uvcg_queue_cancel(queue, 0);
+		return;
+	}
 
 	while (1) {
 		/* Retrieve the first available USB request, protected by the
@@ -659,22 +725,10 @@ static void uvcg_video_pump(struct work_struct *work)
 			spin_unlock_irqrestore(&video->req_lock, flags);
 			return;
 		}
-		direct = video->inflight < UVC_ISOC_INFLIGHT;
-		if (direct)
-			uvc_video_arm(video, req);
-		else
-			list_add_tail(&req->list, &video->req_ready);
+		list_add_tail(&req->list, &video->req_ready);
 		spin_unlock_irqrestore(&video->req_lock, flags);
 
-		if (!direct)
-			continue;
-
-		/* Queued with no lock held, so the UDC's lock nests inside
-		 * nothing of ours.
-		 */
-		if (!video->ep->enabled ||
-		    uvcg_video_ep_queue(video, req) < 0) {
-			uvc_video_unsend(video, req);
+		if (uvc_video_send_ready(video) < 0) {
 			uvcg_queue_cancel(queue, 0);
 			return;
 		}
