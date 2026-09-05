@@ -260,6 +260,7 @@ struct dwc2_hsotg_req {
 	IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)
 #define call_gadget(_hs, _entry) \
 do { \
+	dwc2_gadget_state_##_entry(_hs); \
 	if ((_hs)->gadget.speed != USB_SPEED_UNKNOWN && \
 		(_hs)->driver && (_hs)->driver->_entry) { \
 		spin_unlock(&_hs->lock); \
@@ -1181,6 +1182,10 @@ struct dwc2_hsotg {
 	struct work_struct wf_otg;
 	struct timer_list wkp_timer;
 	enum dwc2_lx_state lx_state;
+	/* The gadget state a bus suspend replaced with USB_STATE_SUSPENDED,
+	 * put back at resume.
+	 */
+	enum usb_device_state resume_state;
 	struct dwc2_gregs_backup gr_backup;
 	struct dwc2_dregs_backup dr_backup;
 	struct dwc2_hregs_backup hr_backup;
@@ -1534,6 +1539,36 @@ void dwc2_gadget_init_lpm(struct dwc2_hsotg *hsotg);
 void dwc2_gadget_program_ref_clk(struct dwc2_hsotg *hsotg);
 static inline void dwc2_clear_fifo_map(struct dwc2_hsotg *hsotg)
 { hsotg->fifo_map = 0; }
+
+/* The bus suspend and resume interrupts reach the gadget driver through
+ * call_gadget(), and these keep the gadget's own state, the one
+ * /sys/class/udc/<udc>/state reports, in step with them. Suspend stows
+ * the state it replaces and reports USB_STATE_SUSPENDED; resume puts the
+ * stowed state back, unless a reset or a disconnect has set its own state
+ * in between, in which case that one stands. L1 sleep is left alone: only
+ * the L2 suspend counts.
+ */
+static inline void dwc2_gadget_state_suspend(struct dwc2_hsotg *hsotg)
+{
+	if (hsotg->lx_state != DWC2_L2 ||
+	    hsotg->gadget.speed == USB_SPEED_UNKNOWN ||
+	    hsotg->gadget.state == USB_STATE_SUSPENDED)
+		return;
+	hsotg->resume_state = hsotg->gadget.state;
+	usb_gadget_set_state(&hsotg->gadget, USB_STATE_SUSPENDED);
+}
+
+static inline void dwc2_gadget_state_resume(struct dwc2_hsotg *hsotg)
+{
+	if (hsotg->gadget.state != USB_STATE_SUSPENDED)
+		return;
+	usb_gadget_set_state(&hsotg->gadget, hsotg->resume_state);
+	hsotg->resume_state = USB_STATE_NOTATTACHED;
+}
+
+static inline void dwc2_gadget_state_disconnect(struct dwc2_hsotg *hsotg)
+{
+}
 #else
 static inline int dwc2_hsotg_remove(struct dwc2_hsotg *dwc2)
 { return 0; }
