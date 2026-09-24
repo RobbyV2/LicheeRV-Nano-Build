@@ -423,3 +423,7 @@ middleware/v2/sample/vio/sample_vio_main.o
 osdrv/extdrv/wireless/.tmp_4261/
 middleware/v2/lib
 host-tools/
+
+# Scratch copy of the NanoKVM app made by kvm/merge_nanokvm_app.sh
+/kvm/kvmapp/
+/mountpoint/
